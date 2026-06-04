@@ -181,6 +181,8 @@ local SCREEN_ABOUT        = "about"
 
 local CHEM_NAMES = { "LiPo", "LiPoHV", "LiIon" }
 local CHARSET    = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-+.#"
+local MFR_MAX  = 10
+local NAME_MAX = 30
 
 local S = {
   screen   = SCREEN_MAIN,
@@ -189,7 +191,6 @@ local S = {
   err      = nil,
   errDetail = nil,
   cursor   = 1,
-  message  = nil,   -- transient one-line status (e.g. validation / save error)
   dialog   = nil,   -- { text, yes = "Yes", no = "No", onYes = fn }
   -- Defaults editor working state
   def        = nil, -- { warn, crit }
@@ -224,37 +225,122 @@ end
 
 local PAD  = 6
 local LINE = math.max(18, math.floor(LCD_H / 13))
+local COL1 = PAD * 2                    -- label / entry column
+local COL2 = math.floor(LCD_W * 0.42)   -- value column (two-column editor fields)
+
+local function btn(name) return "[--" .. name .. "--]" end
+
+-- Packs table column x-anchors (computed from the display width).
+local PK_ID, PK_CYC, PK_WEAR, PK_ACT =
+  COL1, math.floor(LCD_W * 0.24), math.floor(LCD_W * 0.46), math.floor(LCD_W * 0.68)
 
 local function drawHeader(title)
-  lcd.drawFilledRectangle(0, 0, LCD_W, LINE + PAD, COLOR_THEME_SECONDARY1)
-  lcd.drawText(PAD, math.floor(PAD / 2), title, COLOR_THEME_PRIMARY2 + BOLD)
+  local h = LINE + PAD
+  lcd.drawFilledRectangle(0, 0, LCD_W, h, COLOR_THEME_SECONDARY1)
+  local _, th = lcd.sizeText("Mg")            -- font height; vertically centre the title
+  lcd.drawText(PAD, math.floor((h - th) / 2), title, COLOR_THEME_PRIMARY2 + BOLD)
 end
 
 local function bodyY(row)
   return LINE + PAD * 2 + (row - 1) * LINE
 end
 
--- Draws one list row; highlights it when selected. A `disabled` row is dimmed
--- (COLOR_THEME_DISABLED) but still shows the focus background when the cursor is
--- on it, so it remains visible as the current row.
-local function drawRow(row, text, selected, disabled)
-  local y = bodyY(row)
-  if selected then
-    lcd.drawFilledRectangle(PAD, y - 1, LCD_W - 2 * PAD, LINE, COLOR_THEME_FOCUS)
-  end
-  local color = disabled and COLOR_THEME_DISABLED
-                or (selected and COLOR_THEME_PRIMARY2 or COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, y, text, color)
+-- Selection is shown by inverting text (no focus bar). A navigation/action row
+-- (list entry, button, sub-page opener) is a single string at COL1: `folder`
+-- prefixes "> " and bolds it (everything that opens a sub-page), `disabled` dims
+-- it, and the cursor row is drawn INVERS.
+local function drawNavRow(row, text, selected, opts)
+  opts = opts or {}
+  local flags = opts.disabled and COLOR_THEME_DISABLED or COLOR_THEME_PRIMARY1
+  if opts.folder then text = "> " .. text; flags = flags + BOLD end
+  if selected then flags = flags + INVERS end
+  lcd.drawText(COL1, bodyY(row), text, flags)
 end
 
-local function drawFooter(text)
-  lcd.drawText(PAD, LCD_H - LINE, text, COLOR_THEME_PRIMARY1 + SMLSIZE)
+-- A two-column field row: label at COL1, value at COL2. Only the value is
+-- highlighted — INVERS when the row is selected, BLINK+INVERS while editing —
+-- except a folder field (opens a sub-page), where the whole row inverts.
+local function drawFieldRow(row, label, value, opts)
+  opts = opts or {}
+  local y      = bodyY(row)
+  local base   = opts.disabled and COLOR_THEME_DISABLED or COLOR_THEME_PRIMARY1
+  local lflags = base
+  if opts.folder then label = "> " .. label; lflags = lflags + BOLD end
+  if opts.selected and opts.folder then lflags = lflags + INVERS end
+  lcd.drawText(COL1, y, label, lflags)
+  if value ~= nil then
+    local vflags = base
+    if opts.editing then vflags = vflags + BLINK + INVERS
+    elseif opts.selected then vflags = vflags + INVERS end
+    lcd.drawText(COL2, y, value, vflags)
+  end
 end
 
-local function drawMessage()
-  if S.message then
-    lcd.drawText(PAD, LCD_H - 2 * LINE, S.message, COLOR_THEME_WARNING + SMLSIZE)
+-- Draws a row from left-to-right segments starting at COL1, so a single element
+-- can be highlighted instead of the whole line (used by the Packs page when
+-- "dived" into a row). seg.hl: "sel" → INVERS, "edit" → BLINK+INVERS, nil → plain.
+local function drawSegments(row, segments)
+  local x, y = COL1, bodyY(row)
+  for _, seg in ipairs(segments) do
+    local flags = COLOR_THEME_PRIMARY1
+    if seg.hl == "edit" then flags = flags + BLINK + INVERS
+    elseif seg.hl == "sel" then flags = flags + INVERS end
+    lcd.drawText(x, y, seg.text, flags)
+    x = x + (lcd.sizeText and lcd.sizeText(seg.text) or (#seg.text * 6))
   end
+end
+
+-- Action buttons as one horizontal bar pinned just above the footer, separated by
+-- a thin line. The button whose cursor index is selected is drawn inverted.
+-- `firstItem` is the cursor index of labels[1]; pass the screen's cursor value.
+-- Gap (px) between the separator line and the button row.
+local BTN_GAP = 8
+
+-- Y of the separator line above the bottom button bar — also the bottom edge of
+-- the scrolling content area above. The buttons get equal spacing above (to the
+-- separator) and below (to the screen edge): both BTN_GAP.
+local function barTopY()
+  local _, th = lcd.sizeText("Mg")
+  return LCD_H - (th + 4) - 2 * BTN_GAP
+end
+
+-- Bottom button bar: each action is drawn as a real button (outlined box; the
+-- selected one filled with the accent colour). `firstItem` is the cursor index of
+-- labels[1]; pass the screen's cursor value.
+local function drawButtonBar(labels, firstItem, cursor)
+  local _, th = lcd.sizeText("Mg")
+  local btnH  = th + 4
+  local sepY  = barTopY()
+  local btnY  = sepY + BTN_GAP
+  lcd.drawFilledRectangle(PAD, sepY, LCD_W - 2 * PAD, 1, COLOR_THEME_PRIMARY3)
+  local padX, x = 6, PAD
+  for i, label in ipairs(labels) do
+    local w   = lcd.sizeText(label) + 2 * padX
+    if cursor == firstItem + i - 1 then
+      lcd.drawFilledRectangle(x, btnY, w, btnH, COLOR_THEME_FOCUS)
+      lcd.drawText(x + padX, btnY + 2, label, COLOR_THEME_PRIMARY2)
+    else
+      lcd.drawRectangle(x, btnY, w, btnH, COLOR_THEME_PRIMARY1)
+      lcd.drawText(x + padX, btnY + 2, label, COLOR_THEME_PRIMARY1)
+    end
+    x = x + w + PAD
+  end
+end
+
+-- Inline hint for the non-obvious PAGE function of the field being edited: a
+-- "<PAGE>" key chip (filled, like a hardware button) plus what it does, drawn
+-- right-aligned on the edited row.
+-- `valueRight` = right edge (px) of the field's value text; the hint is skipped
+-- when the value would reach it, so a long Name never overlaps the chip.
+local function drawPageHint(y, action, valueRight)
+  local key       = "<PAGE>"
+  local kw, kh    = lcd.sizeText(key)
+  local aw        = lcd.sizeText(action)
+  local x         = LCD_W - PAD - (kw + 4 + 4 + aw)
+  if valueRight and valueRight + PAD > x then return end   -- would overlap the value
+  lcd.drawFilledRectangle(x, y - 1, kw + 4, kh + 2, COLOR_THEME_FOCUS)
+  lcd.drawText(x + 2, y, key, COLOR_THEME_PRIMARY2)
+  lcd.drawText(x + kw + 8, y, action, COLOR_THEME_PRIMARY1)
 end
 
 -- ---------------------------------------------------------------------------
@@ -264,6 +350,12 @@ end
 local function openDialog(text, onYes, yesLabel, noLabel)
   S.dialog = { text = text, onYes = onYes, cursor = 2,  -- default to the safe answer
                yes = yesLabel or "Yes", no = noLabel or "No" }
+end
+
+-- Modal info popup with a single [ OK ] button (dismiss with ENTER/EXIT). Used for
+-- validation / blocked-action messages so they never overlap the screen content.
+local function openAlert(text)
+  S.dialog = { text = text, alert = true }
 end
 
 local function drawDialog()
@@ -277,19 +369,22 @@ local function drawDialog()
   lcd.drawText(x + PAD, y + PAD, d.text, COLOR_THEME_PRIMARY2)
   local by = y + h - LINE - PAD
   local function btn(bx, label, sel)
-    if sel then
-      lcd.drawFilledRectangle(bx - PAD, by - 1, lcd.sizeText(label) + 2 * PAD, LINE, COLOR_THEME_FOCUS)
-      lcd.drawText(bx, by, label, COLOR_THEME_PRIMARY2)
-    else
-      lcd.drawText(bx, by, label, COLOR_THEME_PRIMARY2)
-    end
+    lcd.drawText(bx, by, label, COLOR_THEME_PRIMARY2 + (sel and INVERS or 0))
   end
-  btn(x + PAD * 2,                 d.yes, d.cursor == 1)
-  btn(x + math.floor(w / 2) + PAD, d.no,  d.cursor == 2)
+  if d.alert then
+    btn(math.floor(LCD_W / 2) - PAD * 2, "[ OK ]", true)
+  else
+    btn(x + PAD * 2,                 d.yes, d.cursor == 1)
+    btn(x + math.floor(w / 2) + PAD, d.no,  d.cursor == 2)
+  end
 end
 
 local function handleDialog(e)
   local d = S.dialog
+  if d.alert then
+    if isEnter(e) or isExit(e) then S.dialog = nil end
+    return
+  end
   if isNext(e) or isPrev(e) then
     d.cursor = (d.cursor == 1) and 2 or 1
   elseif isEnter(e) then
@@ -321,10 +416,9 @@ end
 
 local function drawFirstStart()
   drawHeader("LIPONY — First start")
-  lcd.drawText(PAD * 2, bodyY(1), "No configuration found.", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(2), "Press ENTER to create defaults.", COLOR_THEME_PRIMARY1)
-  drawRow(4, "[Create]", true)
-  drawFooter("ENT create   RTN exit")
+  lcd.drawText(COL1, bodyY(1), "No configuration found.", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(2), "Press ENTER to create defaults.", COLOR_THEME_PRIMARY1)
+  drawButtonBar({ "Create" }, 1, 1)
 end
 
 local function handleFirstStart(e)
@@ -347,16 +441,15 @@ end
 local function drawConfigError()
   drawHeader("CONFIG ERROR")
   if S.err == "schema" then
-    lcd.drawText(PAD * 2, bodyY(1), "Schema version mismatch", COLOR_THEME_PRIMARY1)
-    lcd.drawText(PAD * 2, bodyY(2), "(found " .. tostring(S.errDetail) .. ", expected "
+    lcd.drawText(COL1, bodyY(1), "Schema version mismatch", COLOR_THEME_PRIMARY1)
+    lcd.drawText(COL1, bodyY(2), "(found " .. tostring(S.errDetail) .. ", expected "
                  .. SCHEMA_VERSION .. ").", COLOR_THEME_PRIMARY1)
   else
-    lcd.drawText(PAD * 2, bodyY(1), "Parse error in config.lua", COLOR_THEME_PRIMARY1)
+    lcd.drawText(COL1, bodyY(1), "Parse error in config.lua", COLOR_THEME_PRIMARY1)
   end
-  lcd.drawText(PAD * 2, bodyY(3), "Edit config.lua on PC", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(4), "or delete it to reset.", COLOR_THEME_PRIMARY1)
-  drawRow(6, "[Exit]", true)
-  drawFooter("RTN exit")
+  lcd.drawText(COL1, bodyY(3), "Edit config.lua on PC", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(4), "or delete it to reset.", COLOR_THEME_PRIMARY1)
+  drawButtonBar({ "Exit" }, 1, 1)
 end
 
 local function handleConfigError(e)
@@ -368,21 +461,19 @@ end
 -- Screen: main menu
 -- ---------------------------------------------------------------------------
 
-local MAIN_ITEMS = { "Batteries", "Models", "Defaults", "About" }
+local MAIN_ITEMS = { "Batteries", "Models", "Settings", "About" }
 
 local function drawMain()
   drawHeader("LIPONY — SETUP")
   for i, item in ipairs(MAIN_ITEMS) do
-    drawRow(i, item, S.cursor == i)
+    drawNavRow(i, item, S.cursor == i, { folder = true })
   end
-  drawFooter("ENT open   RTN exit")
 end
 
 local function enterDefaults()
   S.def        = { warn = S.cfg.defaults.warn_pct, crit = S.cfg.defaults.crit_pct }
   S.defEditing = false
   S.cursor     = 1
-  S.message    = nil
   S.screen     = SCREEN_DEFAULTS
 end
 
@@ -396,7 +487,7 @@ local function handleMain(e)
     elseif item == "Models" then
       S.screen = SCREEN_MODELS
       S.cursor = 1
-    elseif item == "Defaults" then
+    elseif item == "Settings" then
       enterDefaults()
     elseif item == "About" then
       S.screen = SCREEN_ABOUT
@@ -413,13 +504,12 @@ end
 
 local function drawAbout()
   drawHeader("LIPO-NANNY")
-  lcd.drawText(PAD * 2, bodyY(1), "(c) Mariator-pro   GPL-2.0", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(2), "LIPONY  v" .. VERSION, COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(3), "Widget: /WIDGETS/LIPONY/main.lua", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(4), "Tools:  /SCRIPTS/TOOLS/LIPONY.lua", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(5), "Data:   /SCRIPTS/LIPONY/", COLOR_THEME_PRIMARY1)
-  lcd.drawText(PAD * 2, bodyY(6), "Schema version: " .. SCHEMA_VERSION, COLOR_THEME_PRIMARY1)
-  drawFooter("RTN back")
+  lcd.drawText(COL1, bodyY(1), "(c) Mariator-pro   GPL-2.0", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(2), "LIPONY  v" .. VERSION, COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(3), "Widget: /WIDGETS/LIPONY/main.lua", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(4), "Tools:  /SCRIPTS/TOOLS/LIPONY.lua", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(5), "Data:   /SCRIPTS/LIPONY/", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(6), "Schema version: " .. SCHEMA_VERSION, COLOR_THEME_PRIMARY1)
 end
 
 local function handleAbout(e)
@@ -440,12 +530,11 @@ end
 local function leaveDefaults()
   S.screen = SCREEN_MAIN
   S.cursor = 3
-  S.message = nil
 end
 
 local function saveDefaults()
   if not (S.def.warn > S.def.crit) then
-    S.message = "Warn% must be > Crit%"
+    openAlert("Low must be above Critical")
     return
   end
   S.cfg.defaults.warn_pct = S.def.warn
@@ -462,17 +551,14 @@ local function cancelDefaults()
 end
 
 local function drawDefaults()
-  drawHeader("DEFAULTS")
-  drawRow(1, "Warn threshold:  " .. S.def.warn .. " %"
-             .. (S.defEditing and S.defField == "warn" and "  <" or ""), S.cursor == 1)
-  drawRow(2, "Crit threshold:  " .. S.def.crit .. " %"
-             .. (S.defEditing and S.defField == "crit" and "  <" or ""), S.cursor == 2)
-  drawRow(3, "[Test warn sound]", S.cursor == 3)
-  drawRow(4, "[Test crit sound]", S.cursor == 4)
-  drawRow(5, "[Save]",   S.cursor == 5)
-  drawRow(6, "[Cancel]", S.cursor == 6)
-  drawMessage()
-  drawFooter(S.defEditing and "roll +/-   ENT ok" or "ENT edit/act   RTN back")
+  drawHeader("SETTINGS")
+  drawFieldRow(1, "Low threshold", S.def.warn .. " %",
+               { selected = S.cursor == 1, editing = S.defEditing and S.defField == "warn" })
+  drawFieldRow(2, "Critical threshold", S.def.crit .. " %",
+               { selected = S.cursor == 2, editing = S.defEditing and S.defField == "crit" })
+  drawNavRow(3, btn("Test low sound"), S.cursor == 3)
+  drawNavRow(4, btn("Test critical sound"), S.cursor == 4)
+  drawButtonBar({ "Save", "Cancel" }, 5, S.cursor)
 end
 
 local function handleDefaults(e)
@@ -493,7 +579,6 @@ local function handleDefaults(e)
 
   S.cursor = moveCursor(S.cursor, e, DEF_ITEMS)
   if isEnter(e) then
-    S.message = nil
     if S.cursor == 1 then
       S.defEditing, S.defField, S.defOrig = true, "warn", S.def.warn
     elseif S.cursor == 2 then
@@ -567,8 +652,10 @@ end
 -- Screen: Batteries list
 -- ---------------------------------------------------------------------------
 
-local enterProfile   -- forward declaration (defined below)
-local enterPacks     -- forward declaration (Packs page, defined below)
+local enterProfile      -- forward declaration (defined below)
+local enterPacks        -- forward declaration (Packs page, defined below)
+local modelDisplayName  -- forward declaration (Models section); used by the
+                        -- parallel-binding messages, which are built earlier
 
 local function batteryListItems()
   return sortedBatteries(S.cfg)
@@ -578,15 +665,21 @@ local function drawBatteries()
   drawHeader("BATTERIES")
   local items = batteryListItems()
   if #items == 0 then
-    lcd.drawText(PAD * 2, bodyY(1), "No batteries yet — add your first.", COLOR_THEME_PRIMARY1)
-    drawRow(3, "[+] Add new", S.cursor == 1)
+    lcd.drawText(COL1, bodyY(1), "No batteries yet — add your first.", COLOR_THEME_PRIMARY1)
   else
-    for i, b in ipairs(items) do
-      drawRow(i, b.name, S.cursor == i)
+    -- Scrolling window between header and button bar (the "[+] Add new" cursor
+    -- index, #items+1, keeps the list scrolled to the bottom).
+    local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
+    local focus   = math.max(1, math.min(S.cursor, #items))
+    local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #items - maxRows + 1))
+    if start < 1 then start = 1 end
+    local row = 0
+    for i = start, math.min(#items, start + maxRows - 1) do
+      row = row + 1
+      drawNavRow(row, items[i].name, S.cursor == i, { folder = true })
     end
-    drawRow(#items + 1, "[+] Add new", S.cursor == #items + 1)
   end
-  drawFooter("ENT open   RTN back")
+  drawButtonBar({ "[+] Add new" }, #items + 1, S.cursor)
 end
 
 local function handleBatteries(e)
@@ -659,7 +752,9 @@ end
 local function instancesEqual(a, b)
   if #a ~= #b then return false end
   for i = 1, #a do
-    if a[i].id ~= b[i].id or a[i].label ~= b[i].label or (a[i].wear or 0) ~= (b[i].wear or 0) then
+    if a[i].id ~= b[i].id or a[i].label ~= b[i].label
+       or (a[i].wear or 0) ~= (b[i].wear or 0)
+       or (a[i].cycles or 0) ~= (b[i].cycles or 0) then
       return false
     end
   end
@@ -686,17 +781,20 @@ enterProfile = function(existing)
   -- Normalise both copies to label order (identical sort → no spurious "dirty").
   sortByLabel(S.prof.instances)
   sortByLabel(S.profOrig.instances)
+  -- Cycle counts live in stats.lua, not the profile; load them onto the working
+  -- copies so they can be shown and hand-edited on the Packs page (synced back to
+  -- stats on save). The baseline copy carries them too, for the dirty check.
+  for _, p in ipairs(S.prof.instances)     do p.cycles = cyclesFor(p.id) end
+  for _, p in ipairs(S.profOrig.instances) do p.cycles = cyclesFor(p.id) end
   S.profCursor  = 1
   S.profEditing = nil
   S.capStep     = 100
   S.textBuf     = nil
-  S.message     = nil
   S.screen      = SCREEN_PROFILE
 end
 
 local function leaveProfile()
   S.screen  = SCREEN_BATTERIES
-  S.message = nil
   -- Place the list cursor; clamp later in handler.
 end
 
@@ -714,61 +812,78 @@ local function textWithCursor(buf, pos)
   return before .. "[" .. ch .. "]" .. after
 end
 
--- Builds the display lines; focusable lines carry their item index. While a text
--- field is being edited, its line shows the live buffer instead of the stored value.
+-- Builds the display descriptors; each carries its focusable item index plus the
+-- kind: a two-column field {label,value}, a `folder` field (opens a sub-page) or
+-- a `button`. While a text field is being edited, its value is the live buffer.
 local function buildProfileLines()
   local p, lines = S.prof, {}
-  local function add(text, item) lines[#lines + 1] = { text = text, item = item } end
+  local function field(item, label, value) lines[#lines + 1] = { item = item, label = label, value = value } end
+  local function folder(item, label, value) lines[#lines + 1] = { item = item, label = label, value = value, folder = true } end
+
   if S.profEditing == 1 then
-    add("Name: " .. textWithCursor(S.textBuf, S.textPos), 1)
+    field(1, "Name", textWithCursor(S.textBuf, S.textPos))
   else
-    add("Name: " .. p.name .. (p.nameAuto and "  (auto)" or ""), 1)
+    field(1, "Name", p.name .. (p.nameAuto and "  (auto)" or ""))
   end
   if S.profEditing == 2 then
-    add("Manufacturer: " .. textWithCursor(S.textBuf, S.textPos), 2)
+    field(2, "Manufacturer", textWithCursor(S.textBuf, S.textPos))
   else
-    add("Manufacturer: " .. (p.manufacturer ~= "" and p.manufacturer or "—"), 2)
+    field(2, "Manufacturer", p.manufacturer ~= "" and p.manufacturer or "—")
   end
-  add("Chemistry: " .. p.chemistry, 3)
-  add("Capacity: " .. p.capacityMah .. " mAh"
-      .. (S.profEditing == 4 and ("   step " .. S.capStep) or ""), 4)
-  add("Cells: " .. p.cells .. "S", 5)
+  field(3, "Chemistry", p.chemistry)
+  field(4, "Capacity", p.capacityMah .. " mAh")
+  field(5, "Cells", p.cells .. "S")
   -- Opens the Packs page (per-pack cycles, wear, add/archive).
-  add("Packs: " .. #p.instances .. "  >", 6)
-  add("Warn %: " .. (p.warn_pct and tostring(p.warn_pct)
-      or ("— (default " .. S.cfg.defaults.warn_pct .. ")")), 7)
-  add("Crit %: " .. (p.crit_pct and tostring(p.crit_pct)
-      or ("— (default " .. S.cfg.defaults.crit_pct .. ")")), 8)
-  add("[Save]", 9)
-  add("[Cancel]", 10)
-  if not S.profIsNew then add("[Delete]", 11) end
+  folder(6, "Packs", tostring(#p.instances))
+  field(7, "Low", p.warn_pct and (p.warn_pct .. " %")
+        or (S.cfg.defaults.warn_pct .. " % (default)"))
+  field(8, "Critical", p.crit_pct and (p.crit_pct .. " %")
+        or (S.cfg.defaults.crit_pct .. " % (default)"))
+  -- Items 9/10/(11) are the Save/Cancel/Delete buttons; they are not field rows —
+  -- drawProfile renders them in the pinned bottom button bar.
   return lines
+end
+
+-- Bottom-bar buttons: Save/Cancel always, Delete for an existing profile, and
+-- "Reset name" only while the name is a manual override (nameAuto == false) — it
+-- reverts to the auto-generated name. The cursor index of labels[i] is 8 + i.
+local function profileActions()
+  local acts = { "Save", "Cancel" }
+  if not S.profIsNew then acts[#acts + 1] = "Delete" end
+  if not S.prof.nameAuto then acts[#acts + 1] = "Reset name" end
+  return acts
 end
 
 local function drawProfile()
   drawHeader(S.profIsNew and "ADD BATTERY" or "EDIT BATTERY")
   local lines = buildProfileLines()
-  local focus = 1
+  -- When the cursor is on a button (item > #lines) keep the bottom fields in view.
+  local focus = #lines
   for i, ln in ipairs(lines) do
     if ln.item == S.profCursor then focus = i break end
   end
-  local maxRows = math.max(1, math.floor((LCD_H - bodyY(1) - LINE) / LINE))
+  -- Reserve the bottom line for the pinned button bar (+separator).
+  local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
   local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #lines - maxRows + 1))
   if start < 1 then start = 1 end
+  local editY, editVal
   for i = start, math.min(#lines, start + maxRows - 1) do
     local ln  = lines[i]
-    local sel = ln.item ~= nil and ln.item == S.profCursor
-    drawRow(i - start + 1, (S.profEditing == ln.item and "> " or "") .. ln.text, sel)
+    local sel = ln.item == S.profCursor
+    local row = i - start + 1
+    -- Text fields (1,2) show their bracketed live buffer; don't also blink it.
+    local editing = (S.profEditing == ln.item) and ln.item ~= 1 and ln.item ~= 2
+    drawFieldRow(row, ln.label, ln.value, { selected = sel, editing = editing, folder = ln.folder })
+    if ln.item == S.profEditing then editY = bodyY(row); editVal = ln.value end
   end
-  drawMessage()
-  if S.profEditing == 4 then
-    drawFooter("roll +/-   PAGE step   ENT ok")
-  elseif S.profEditing == 1 or S.profEditing == 2 then
-    drawFooter("roll char   PAGE pos   ENT ok")
-  elseif S.profEditing then
-    drawFooter("roll +/-   ENT ok")
-  else
-    drawFooter("ENT edit/act   RTN back")
+  drawButtonBar(profileActions(), 9, S.profCursor)
+  -- Inline PAGE hint for the two fields whose PAGE function isn't self-evident;
+  -- skipped automatically if the value text would reach the chip.
+  local valueRight = editVal and (COL2 + lcd.sizeText(editVal))
+  if editY and S.profEditing == 4 then
+    drawPageHint(editY, "step " .. S.capStep, valueRight)
+  elseif editY and (S.profEditing == 1 or S.profEditing == 2) then
+    drawPageHint(editY, "move cursor", valueRight)
   end
 end
 
@@ -797,6 +912,7 @@ end
 local function startTextEdit(field)
   S.profEditing = field
   S.textBuf = (field == 2) and S.prof.manufacturer or S.prof.name
+  S.textMax = (field == 2) and MFR_MAX or NAME_MAX
   S.textPos = math.max(1, #S.textBuf)
   if #S.textBuf == 0 then S.textPos = 1 end
 end
@@ -824,7 +940,7 @@ local function handleTextEdit(e)
   elseif isPrev(e) then
     S.textBuf = setChar(S.textBuf, S.textPos, cycleChar(charAt(S.textBuf, S.textPos), -1))
   elseif isPageNext(e) then
-    S.textPos = math.min(#S.textBuf + 1, S.textPos + 1)
+    S.textPos = math.min(S.textMax, #S.textBuf + 1, S.textPos + 1)
   elseif isPagePrev(e) then
     S.textPos = math.max(1, S.textPos - 1)
   elseif isEnter(e) then
@@ -856,15 +972,14 @@ local function adjustNumber(e)
     if isNext(e) then p.cells = math.min(30, p.cells + 1)
     elseif isPrev(e) then p.cells = math.max(1, p.cells - 1) end
     refreshAutoName()
-  elseif item == 7 or item == 8 then                 -- warn/crit override (nil or 1..99)
+  elseif item == 7 or item == 8 then                 -- warn/crit override (nil = follow default)
     local key = (item == 7) and "warn_pct" or "crit_pct"
-    if isNext(e) then
-      p[key] = p[key] and math.min(99, p[key] + 1) or 1
-    elseif isPrev(e) then
-      if p[key] == nil then           -- stays empty
-      elseif p[key] <= 1 then p[key] = nil
-      else p[key] = p[key] - 1 end
-    end
+    local def = (item == 7) and S.cfg.defaults.warn_pct or S.cfg.defaults.crit_pct
+    local cur = p[key] or def         -- nil sits on the default value
+    if isNext(e) then cur = math.min(99, cur + 1)
+    elseif isPrev(e) then cur = math.max(1, cur - 1) end
+    -- Landing back on the default value clears the override (shows "(default)").
+    if cur == def then p[key] = nil else p[key] = cur end
   end
   if isEnter(e) then S.profEditing = nil end
 end
@@ -877,7 +992,7 @@ local function parallelModelsUsing(cfg, id)
   for name, m in pairs(cfg.models or {}) do
     if m.parallel == true and m.batteryIds then
       for _, bid in ipairs(m.batteryIds) do
-        if bid == id then out[#out + 1] = name; break end
+        if bid == id then out[#out + 1] = modelDisplayName(name); break end
       end
     end
   end
@@ -907,11 +1022,11 @@ end
 
 local function validateProfile()
   if S.prof.manufacturer == "" then
-    S.message = "Manufacturer required"
+    openAlert("Manufacturer required")
     return false
   end
   if S.prof.warn_pct and S.prof.crit_pct and not (S.prof.warn_pct > S.prof.crit_pct) then
-    S.message = "Warn% must be > Crit%"
+    openAlert("Low must be above Critical")
     return false
   end
   return true
@@ -920,68 +1035,61 @@ end
 local function gotoBatteries()
   S.screen = SCREEN_BATTERIES
   S.cursor = 1
-  S.message = nil
 end
 
-local function finishSave()
-  withRetry(function() return saveConfig(S.cfg) end, gotoBatteries)
-end
-
--- Mints pack ids for packs the pilot just added (placeholders, id == nil) and
+-- Mints pack ids for packs the pilot just added (placeholders, id == nil),
 -- archives packs removed on the Packs page (present in the stored profile, gone
--- from the working copy). Returns true if anything was archived (→ stats write).
--- Runs once before the retried file writes.
+-- from the working copy), and writes back any hand-edited cycle counts onto
+-- stats.instances. Returns true if stats.lua needs a write (something archived or
+-- a cycle count changed). Runs once before the retried file writes.
 local function reconcileInstances()
   for _, p in ipairs(S.prof.instances) do
     if not p.id then p.id = nextPackId(S.cfg) end
   end
   local kept = {}
   for _, p in ipairs(S.prof.instances) do kept[p.id] = true end
-  local archivedAny = false
+  local statsDirty = false
+  -- Archive packs removed from the list.
   for _, p in ipairs(S.profOrig.instances) do
     if p.id and not kept[p.id] then
       archiveInstance(S.stats, S.profOrig.name, p.id)
-      archivedAny = true
+      statsDirty = true
     end
   end
-  return archivedAny
-end
-
--- Writes the edited profile back into the library. Archiving of removed packs and
--- minting of new pack ids both happen in reconcileInstances; the stats file is
--- written only when something was archived (stats first, then config).
-local function doSaveExisting()
-  local archivedAny = reconcileInstances()
-  for i, b in ipairs(S.cfg.batteries) do
-    if b.id == S.prof.id then
-      local np = copyProfile(S.prof); np.id = S.prof.id
-      S.cfg.batteries[i] = np
-      break
+  -- Persist (possibly hand-edited) cycle counts of the kept packs.
+  for _, p in ipairs(S.prof.instances) do
+    local cur  = (S.stats.instances[p.id] and S.stats.instances[p.id].cycles) or 0
+    local want = p.cycles or 0
+    if want ~= cur then
+      S.stats.instances[p.id] = S.stats.instances[p.id] or {}
+      S.stats.instances[p.id].cycles = want
+      statsDirty = true
     end
   end
-  withRetry(function()
-    if archivedAny and not writeStats(S.stats) then return false end
-    return saveConfig(S.cfg)
-  end, gotoBatteries)
+  return statsDirty
 end
 
+-- Persists the edited profile: reconcile packs (ids / archive / cycle edits) into
+-- stats, write the profile back into the library, then write stats (only when it
+-- changed) followed by the config.
 local function saveProfile()
   if not validateProfile() then return end
   if S.prof.nameAuto then S.prof.name = genName(S.prof) end
+  if S.profIsNew then S.prof.id = nextBatteryId(S.cfg) end
 
+  local statsDirty = reconcileInstances()
+  local np = copyProfile(S.prof); np.id = S.prof.id
   if S.profIsNew then
-    S.prof.id = nextBatteryId(S.cfg)
-    for _, p in ipairs(S.prof.instances) do
-      if not p.id then p.id = nextPackId(S.cfg) end
+    S.cfg.batteries[#S.cfg.batteries + 1] = np
+  else
+    for i, b in ipairs(S.cfg.batteries) do
+      if b.id == S.prof.id then S.cfg.batteries[i] = np; break end
     end
-    S.cfg.batteries[#S.cfg.batteries + 1] = copyProfile(S.prof)
-    finishSave()
-    return
   end
-
-  -- Pack archiving/adding already happened interactively on the Packs page; here
-  -- we just persist. (Parallel/stats guards live on the Packs page Archive action.)
-  doSaveExisting()
+  withRetry(function()
+    if statsDirty and not writeStats(S.stats) then return false end
+    return saveConfig(S.cfg)
+  end, gotoBatteries)
 end
 
 -- --- delete (archives the profile and all its packs) ---
@@ -1005,12 +1113,12 @@ end
 local function deleteProfile()
   -- Deleting archives all packs → writes stats. Refuse if stats is unreadable.
   if S.statsErr then
-    S.message = "stats.lua unreadable — fix/delete on PC first"
+    openAlert("stats.lua unreadable — fix on PC")
     return
   end
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 then
-    S.message = "Parallel model(s) " .. table.concat(names, ", ") .. " — unassign first"
+    openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. " — unassign first")
     return
   end
   openDialog("Delete profile and archive all " .. #S.profOrig.instances .. " packs?",
@@ -1025,9 +1133,17 @@ local function cancelProfile()
   end
 end
 
--- 1..10 always; 11 = [Delete] for an existing profile.
+-- Reverts a manually overridden name to the auto-generated one, then parks the
+-- cursor on the Name field (the "Reset name" button it sat on just vanished).
+local function resetName()
+  S.prof.nameAuto = true
+  S.prof.name = genName(S.prof)
+  S.profCursor = 1
+end
+
+-- 8 field items, then the bottom-bar buttons (Save/Cancel + maybe Delete/Reset).
 local function profileItemCount()
-  return S.profIsNew and 10 or 11
+  return 8 + #profileActions()
 end
 
 local function handleProfile(e)
@@ -1041,7 +1157,6 @@ local function handleProfile(e)
 
   S.profCursor = moveCursor(S.profCursor, e, profileItemCount())
   if isEnter(e) then
-    S.message = nil
     local c = S.profCursor
     if c == 1 or c == 2 then
       startTextEdit(c)
@@ -1049,12 +1164,12 @@ local function handleProfile(e)
       S.profEditing = c
     elseif c == 6 then
       enterPacks()
-    elseif c == 9 then
-      saveProfile()
-    elseif c == 10 then
-      cancelProfile()
-    elseif c == 11 then
-      deleteProfile()
+    elseif c >= 9 then
+      local act = profileActions()[c - 8]
+      if act == "Save" then saveProfile()
+      elseif act == "Cancel" then cancelProfile()
+      elseif act == "Delete" then deleteProfile()
+      elseif act == "Reset name" then resetName() end
     end
   elseif isExit(e) then
     cancelProfile()
@@ -1075,7 +1190,7 @@ end
 -- The model's EdgeTX display name, read straight from /MODELS/<filename>.yml
 -- (the header's first `name:` field) — no EdgeTX API needed, works for any model.
 -- Falls back to the filename, and caches per session so the file is read once.
-local function modelDisplayName(filename)
+modelDisplayName = function(filename)
   if not filename then return "?" end
   S.modelNames = S.modelNames or {}
   if S.modelNames[filename] == nil then
@@ -1139,20 +1254,26 @@ local function drawModels()
   drawHeader("MODELS")
   local active = modelFilename()
   local keys   = modelKeys(S.cfg, active)
-  local row    = 0
-  for i, k in ipairs(keys) do
-    row = i
-    drawRow(row, modelDisplayName(k) .. (k == active and "   [active]" or ""), S.cursor == i)
-  end
-  -- Offer to add the active model when it is not configured yet.
-  if active and not (S.cfg.models and S.cfg.models[active]) then
-    row = row + 1
-    drawRow(row, "[+] Add current model", S.cursor == #keys + 1)
-  end
   if #keys == 0 and not active then
-    lcd.drawText(PAD * 2, bodyY(1), "No models configured.", COLOR_THEME_PRIMARY1)
+    lcd.drawText(COL1, bodyY(1), "No models configured.", COLOR_THEME_PRIMARY1)
+  else
+    -- Scrolling window between header and button bar (same as the Batteries list).
+    local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
+    local focus   = math.max(1, math.min(S.cursor, #keys))
+    local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #keys - maxRows + 1))
+    if start < 1 then start = 1 end
+    local row = 0
+    for i = start, math.min(#keys, start + maxRows - 1) do
+      row = row + 1
+      local k = keys[i]
+      drawNavRow(row, modelDisplayName(k) .. (k == active and "   [active]" or ""),
+                 S.cursor == i, { folder = true })
+    end
   end
-  drawFooter("ENT open   RTN back")
+  -- Offer to add the active model when it is not configured yet (pinned bottom bar).
+  if active and not (S.cfg.models and S.cfg.models[active]) then
+    drawButtonBar({ "[+] Add current model" }, #keys + 1, S.cursor)
+  end
 end
 
 local function modelListCount()
@@ -1199,7 +1320,6 @@ enterModel = function(key)
   for _, id in ipairs(S.model.batteryIds) do S.modelOrig.batteryIds[#S.modelOrig.batteryIds + 1] = id end
   S.modelCursor  = 1
   S.modelEditing = false
-  S.message      = nil
   S.screen       = SCREEN_MODEL
 end
 
@@ -1216,20 +1336,17 @@ end
 local function drawModel()
   drawHeader(S.modelIsNew and ("ADD MODEL  " .. modelDisplayName(S.model.filename))
              or ("EDIT MODEL  " .. modelDisplayName(S.model.filename)))
-  drawRow(1, "Cells: " .. S.model.cells .. "S" .. (S.modelEditing and "  <" or ""), S.modelCursor == 1)
-  drawRow(2, "Parallel: " .. (S.model.parallel and "Yes" or "No"), S.modelCursor == 2)
-  drawRow(3, "Batteries: " .. #S.model.batteryIds .. " selected  >", S.modelCursor == 3)
-  drawRow(4, "[Save]",   S.modelCursor == 4)
-  drawRow(5, "[Cancel]", S.modelCursor == 5)
-  if not S.modelIsNew then drawRow(6, "[Delete]", S.modelCursor == 6) end
-  drawMessage()
-  drawFooter(S.modelEditing and "roll +/-   ENT ok" or "ENT edit/act   RTN back")
+  drawFieldRow(1, "Cells", S.model.cells .. "S", { selected = S.modelCursor == 1, editing = S.modelEditing })
+  drawFieldRow(2, "Parallel packs", S.model.parallel and "Yes" or "No", { selected = S.modelCursor == 2 })
+  drawFieldRow(3, "Batteries", #S.model.batteryIds .. " selected", { selected = S.modelCursor == 3, folder = true })
+  local actions = S.modelIsNew and { "Save", "Cancel" }
+                  or { "Save", "Cancel", "Delete" }
+  drawButtonBar(actions, 4, S.modelCursor)
 end
 
 local function leaveModel()
   S.screen  = SCREEN_MODELS
   S.cursor  = 1
-  S.message = nil
 end
 
 local function finishModelSave()
@@ -1243,7 +1360,7 @@ end
 -- Parallel invariant check, then write.
 local function proceedModelSave()
   if S.model.parallel and not parallelInvariantOk(S.cfg, S.model) then
-    S.message = "Parallel needs a profile with 2+ packs"
+    openAlert("Parallel mode needs a profile with 2+ packs")
     return
   end
   finishModelSave()
@@ -1304,7 +1421,6 @@ local function handleModel(e)
 
   S.modelCursor = moveCursor(S.modelCursor, e, modelItemCount())
   if isEnter(e) then
-    S.message = nil
     local c = S.modelCursor
     if c == 1 then
       S.modelEditing = true
@@ -1369,17 +1485,16 @@ local function drawAssign()
   drawHeader(S.model.parallel and ("SELECT " .. S.model.cells .. "S PARALLEL PROFILE")
              or ("SELECT " .. S.model.cells .. "S BATTERIES"))
   if #S.assignItems == 0 then
-    lcd.drawText(PAD * 2, bodyY(1), "No matching profiles.", COLOR_THEME_PRIMARY1)
+    lcd.drawText(COL1, bodyY(1), "No matching profiles.", COLOR_THEME_PRIMARY1)
   end
   for i, it in ipairs(S.assignItems) do
     local box
     if S.model.parallel then box = it.checked and "(o) " or "( ) "
     else box = it.checked and "[x] " or "[ ] " end
     -- Non-selectable profiles (parallel needs 2+ packs) are simply dimmed.
-    drawRow(i, box .. it.name, S.assignCursor == i, not it.selectable)
+    drawNavRow(i, box .. it.name, S.assignCursor == i, { disabled = not it.selectable })
   end
-  drawRow(#S.assignItems + 1, "[Done]", S.assignCursor == #S.assignItems + 1)
-  drawFooter("ENT toggle/done   RTN done")
+  drawButtonBar({ "Done" }, #S.assignItems + 1, S.assignCursor)
 end
 
 local function handleAssign(e)
@@ -1411,46 +1526,86 @@ end
 
 -- Reason string if the highlighted pack must not be archived, else nil.
 local function packArchiveLocked()
-  if #S.prof.instances <= 1 then return "Last pack — use [Delete]" end
+  if #S.prof.instances <= 1 then return "Last pack — delete the profile instead" end
   if S.statsErr then return "stats.lua unreadable — fix on PC" end
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 and (#S.prof.instances - 1) < 2 then
-    return "Parallel " .. table.concat(names, ",") .. " needs 2+ packs"
+    return "Used by parallel model(s) " .. table.concat(names, ", ") .. " — keep 2+ packs"
   end
   return nil
 end
 
+-- Editable cells of a dived-in pack row, in roller order.
+local PACK_SUBS = { "cycles", "wear", "archive" }
+
 enterPacks = function()
   S.packsCursor  = 1
-  S.packDive     = nil      -- active row (dived in) or nil
-  S.packSub      = "wear"   -- "wear" | "archive" while dived
+  S.packDive     = nil        -- active row (dived in) or nil
+  S.packSub      = "cycles"   -- "cycles" | "wear" | "archive" while dived
+  S.packEditCyc  = false
   S.packEditWear = false
-  S.message      = nil
   S.screen       = SCREEN_PACKS
 end
 
 local function drawPacks()
   drawHeader("PACKS — " .. S.prof.name)
   local packs = S.prof.instances
-  for i, p in ipairs(packs) do
-    local cyc   = S.statsErr and "?" or tostring(cyclesFor(p.id))
-    local dived = (S.packDive == i)
-    local wf    = dived and S.packSub == "wear"
-    local af    = dived and S.packSub == "archive"
-    local wear  = (wf and S.packEditWear) and ("[" .. p.wear .. "%]")
-                  or ((wf and ">" or " ") .. p.wear .. "%")
-    local arch  = dived and ("   " .. (af and ">" or " ") .. "Archive") or ""
-    local txt   = string.format("#%-2d  %3s cyc   Wear %s%s", p.label, cyc, wear, arch)
-    drawRow(i, txt, S.packsCursor == i)
+
+  -- Column header row (bold, not selectable).
+  local hy = bodyY(1)
+  lcd.drawText(PK_ID,   hy, "ID",     COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK_CYC,  hy, "Cycles", COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK_WEAR, hy, "Wear",   COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK_ACT,  hy, "Remove", COLOR_THEME_PRIMARY1 + BOLD)
+
+  -- Scrolling window of pack rows between the header and the pinned button bar,
+  -- so many packs never overrun the bar. The selected row is kept in view; when
+  -- the cursor is on Add/Done it stays scrolled to the bottom packs.
+  local n       = #packs
+  local maxRows = math.max(1, math.floor((barTopY() - bodyY(2)) / LINE))
+  local focus   = math.max(1, math.min(S.packsCursor, n))
+  local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), n - maxRows + 1))
+  if start < 1 then start = 1 end
+  local dispRow = 1                              -- 1 = header row
+  for i = start, math.min(n, start + maxRows - 1) do
+    local p      = packs[i]
+    dispRow      = dispRow + 1
+    local y      = bodyY(dispRow)
+    local dived  = S.packDive == i
+    local rowSel = (S.packsCursor == i) and not dived
+    -- In row navigation only the ID cell inverts (marks the current row); after
+    -- diving in, only the active cell inverts (the wear/cycle cell blinks while
+    -- being edited).
+    local function cell(x, text, active, editing)
+      local f = COLOR_THEME_PRIMARY1
+      if editing then f = f + BLINK + INVERS
+      elseif active then f = f + INVERS end
+      lcd.drawText(x, y, text, f)
+    end
+    local cyc        = S.statsErr and "?" or tostring(p.cycles or 0)
+    local cycActive  = dived and S.packSub == "cycles"
+    local wearActive = dived and S.packSub == "wear"
+    local actActive  = dived and S.packSub == "archive"
+    cell(PK_ID,   "#" .. p.label, rowSel, false)
+    cell(PK_CYC,  cyc,            cycActive, cycActive and S.packEditCyc)
+    cell(PK_WEAR, p.wear .. " %", wearActive, wearActive and S.packEditWear)
+    cell(PK_ACT,  "Remove",       actActive, false)
   end
-  drawRow(#packs + 1, "[+] Add pack", S.packsCursor == #packs + 1)
-  drawRow(#packs + 2, "[Done]",       S.packsCursor == #packs + 2)
-  drawFooter("ENT select/edit   RTN back")
-  drawMessage()
+
+  drawButtonBar({ "[+] Add pack", "Done" }, #packs + 1, S.packsCursor)
 end
 
 local function handlePacks(e)
   local packs = S.prof.instances
+
+  -- Editing the cycle count of the dived row (written back to stats on save).
+  if S.packEditCyc then
+    local p = packs[S.packDive]
+    if isNext(e) then p.cycles = math.min(9999, (p.cycles or 0) + 1)
+    elseif isPrev(e) then p.cycles = math.max(0, (p.cycles or 0) - 1)
+    elseif isEnter(e) or isExit(e) then S.packEditCyc = false end
+    return 0
+  end
 
   -- Editing the wear value of the dived row.
   if S.packEditWear then
@@ -1461,17 +1616,24 @@ local function handlePacks(e)
     return 0
   end
 
-  -- Dived into a row: roller switches wear<->archive, ENTER acts, EXIT leaves.
+  -- Dived into a row: roller moves Cycles→Wear→Remove, ENTER acts, EXIT leaves.
   if S.packDive then
     if isNext(e) or isPrev(e) then
-      S.packSub = (S.packSub == "wear") and "archive" or "wear"
+      local idx = 1
+      for j, s in ipairs(PACK_SUBS) do if s == S.packSub then idx = j end end
+      idx = idx + (isNext(e) and 1 or -1)
+      if idx < 1 then idx = #PACK_SUBS elseif idx > #PACK_SUBS then idx = 1 end
+      S.packSub = PACK_SUBS[idx]
     elseif isEnter(e) then
-      if S.packSub == "wear" then
+      if S.packSub == "cycles" then
+        if S.statsErr then openAlert("stats.lua unreadable — fix on PC")
+        else S.packEditCyc = true end
+      elseif S.packSub == "wear" then
         S.packEditWear = true
       else
         local reason = packArchiveLocked()
         if reason then
-          S.message = reason
+          openAlert(reason)
         else
           table.remove(packs, S.packDive)   -- archived for real on profile save
           S.packDive = nil
@@ -1487,15 +1649,14 @@ local function handlePacks(e)
   -- Row navigation.
   S.packsCursor = moveCursor(S.packsCursor, e, #packs + 2)
   if isEnter(e) then
-    S.message = nil
     local c = S.packsCursor
     if c <= #packs then
-      S.packDive, S.packSub = c, "wear"
+      S.packDive, S.packSub = c, "cycles"
     elseif c == #packs + 1 then              -- [+] Add pack
       if #packs >= 20 then
-        S.message = "Max 20 packs"
+        openAlert("Max 20 packs")
       else
-        packs[#packs + 1] = { id = nil, label = nextLabel(packs), wear = 0 }
+        packs[#packs + 1] = { id = nil, label = nextLabel(packs), wear = 0, cycles = 0 }
         sortByLabel(packs)                   -- keep #1,#2,#3 order in the table
       end
     else                                      -- [Done]
@@ -1519,7 +1680,6 @@ local function init()
   if S.statsErr then S.stats = { schemaVersion = SCHEMA_VERSION, instances = {}, archive = {} } end
   S.modelNames = {}
   S.cursor    = 1
-  S.message   = nil
   S.dialog    = nil
   if S.err == "missing" then
     S.screen = SCREEN_FIRST_START
