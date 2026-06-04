@@ -30,6 +30,7 @@ local SCHEMA_VERSION       = 1
 local CONFIG_POLL_INTERVAL = 500  -- 5 s in hundredths of a second (getTime())
 local ENDED_TIMEOUT        = 500  -- 5 s without online signal → ENDED
 local TICK_INTERVAL        = 10   -- 0.1 s; data-processing cadence (10 Hz)
+local TIME_LEFT_INTERVAL   = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
 local REST_VOLTAGE_DELAY   = 100  -- 1 s after CONNECTED before sampling the resting voltage
 local ERROR_LIMIT          = 5    -- consecutive tick failures before the widget gives up
 
@@ -47,13 +48,52 @@ local S     = LCD_W / REF_W
 local TH    = math.floor(18 * S + 0.5)  -- standard line height for default font
 local function sx(v) return math.floor(v * S + 0.5) end
 
--- Battery chemistries. Per entry: chargeVoltage
--- (100% SoC), dischargeVoltage (0% SoC) and a descending SoC curve of
--- {v_per_cell, soc%} pairs (5% steps), used by lookupNearestSoc().
+-- Fixed dark-panel palette (the widget paints its own background, so it looks the
+-- same regardless of the radio theme). The percent value, battery glyph and the
+-- threshold bar recolour green/yellow/red via getBarColor(); everything else uses
+-- these. RGB values are tuned to the reference screenshot.
+local COLORS = {
+  panel  = lcd.RGB( 18,  20,  18),   -- near-black background
+  accent = lcd.RGB(124, 210,  48),   -- lime green (label, voltage)
+  white  = lcd.RGB(235, 235, 235),   -- primary readouts
+  muted  = lcd.RGB(150, 150, 150),   -- captions / secondary lines
+  track  = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
+}
+
+-- Font flags from largest to smallest. XXLSIZE/DBLSIZE/MIDSIZE/SMLSIZE are EdgeTX
+-- globals; 0 is the default font. Used by pickFont() to scale to the zone.
+local FONTS = { XXLSIZE, DBLSIZE, MIDSIZE, 0, SMLSIZE }
+
+-- Largest font flag whose rendered text fits within maxW×maxH, plus its measured
+-- width/height. Falls back to the smallest font if nothing fits.
+local function pickFont(text, maxW, maxH)
+  for _, flag in ipairs(FONTS) do
+    local tw, th = lcd.sizeText(text, flag)
+    if tw <= maxW and th <= maxH then return flag, tw, th end
+  end
+  local tw, th = lcd.sizeText(text, SMLSIZE)
+  return SMLSIZE, tw, th
+end
+
+-- Draws coloured text. A raw lcd.RGB() value must NOT be added to the drawText
+-- flags — its bits collide with the size/attribute flags (a green accent can flip
+-- a size bit and double the font). EdgeTX's custom colour goes through the
+-- CUSTOM_COLOR slot; `flags` then carries only size/align/BOLD.
+local function dtext(x, y, text, color, flags)
+  lcd.setColor(CUSTOM_COLOR, color)
+  lcd.drawText(x, y, text, CUSTOM_COLOR + (flags or 0))
+end
+
+-- Battery chemistries. Per entry: chargeVoltage (100% SoC), dischargeVoltage
+-- (0% SoC), a descending SoC curve of {v_per_cell, soc%} pairs (5% steps) used by
+-- lookupNearestSoc(), and voltageWarn/voltageCrit — per-cell loaded-voltage
+-- thresholds that colour the live V readout green/yellow/red.
 local CHEMISTRIES = {
   LiPo = {
     chargeVoltage    = 4.20,
     dischargeVoltage = 3.00,
+    voltageWarn      = 3.70,   -- ≥ green, below → yellow
+    voltageCrit      = 3.50,   -- below → red
     socCurve = {
       {4.20, 100},
       {4.14,  95},
@@ -81,6 +121,8 @@ local CHEMISTRIES = {
   LiPoHV = {
     chargeVoltage    = 4.35,
     dischargeVoltage = 3.00,
+    voltageWarn      = 3.70,
+    voltageCrit      = 3.50,
     socCurve = {
       {4.35, 100},
       {4.26,  95},
@@ -108,6 +150,8 @@ local CHEMISTRIES = {
   LiIon = {
     chargeVoltage    = 4.20,
     dischargeVoltage = 2.80,
+    voltageWarn      = 3.20,   -- Li-Ion sags more and cuts off lower than LiPo
+    voltageCrit      = 2.90,
     socCurve = {
       {4.20, 100},
       {4.07,  95},
@@ -315,6 +359,8 @@ local function resetFlightState(ctx)
   ctx.critPlayed          = false
   ctx.currentSumA         = 0
   ctx.currentSampleCount  = 0
+  ctx.timeLeftStr         = nil   -- recompute the displayed time-left promptly
+  ctx.timeLeftStamp       = nil
   ctx.restVoltage         = nil
   ctx.startSoc            = nil
   ctx.startOffsetMah      = nil
@@ -606,8 +652,10 @@ local function calculateRestPct(ctx)
   return pct
 end
 
--- Remaining flight time in seconds, or nil if not yet computable.
--- Pure data; warmup gating happens in formatTimeLeft.
+-- Remaining flight time in seconds, or nil if not yet computable. Counts down to
+-- the CRIT threshold (not 0%): you should land by then so the pack is never deep-
+-- discharged, so the usable reserve is the charge ABOVE crit%. Returns 0 once at
+-- or below crit ("land now"). Pure data; warmup gating happens in formatTimeLeft.
 local function calculateTimeLeftSeconds(ctx)
   if ctx.currentSampleCount == 0 then return nil end
   local avgCurrent = ctx.currentSumA / ctx.currentSampleCount
@@ -616,7 +664,10 @@ local function calculateTimeLeftSeconds(ctx)
   if not restPct then return nil end
   local effective = effectiveCapacityMah(ctx)
   if not effective then return nil end
-  local restMah = effective * restPct / 100
+  local _, crit  = getThresholds(ctx)
+  local usablePct = restPct - crit
+  if usablePct <= 0 then return 0 end           -- at/below crit → land now
+  local restMah = effective * usablePct / 100
   return restMah / 1000 / avgCurrent * 3600  -- mAh → Ah → h → s
 end
 
@@ -634,9 +685,21 @@ local function formatTimeLeft(ctx)
   return string.format("%02d:%02d", m, s)
 end
 
+-- Refreshes the DISPLAYED time-left string at most every TIME_LEFT_INTERVAL (2 s).
+-- The underlying current average keeps accumulating every tick (in the state
+-- machine); this only throttles how often that running value is snapshotted for
+-- the screen, so a momentary throttle blip doesn't make the mm:ss twitch.
+local function refreshTimeLeft(ctx)
+  local now = getTime()
+  if not ctx.timeLeftStr or (now - (ctx.timeLeftStamp or 0)) >= TIME_LEFT_INTERVAL then
+    ctx.timeLeftStr   = formatTimeLeft(ctx)
+    ctx.timeLeftStamp = now
+  end
+end
+
 -- Bar-fill color (only the bar changes color, text stays neutral).
 local function getBarColor(restPct, warnPct, critPct)
-  if restPct > warnPct then return lcd.RGB(60, 180, 60)  end   -- green
+  if restPct > warnPct then return COLORS.accent        end   -- green
   if restPct > critPct then return lcd.RGB(255, 180, 0)  end   -- yellow
   return lcd.RGB(220, 40, 40)                                  -- red
 end
@@ -653,57 +716,304 @@ local function formatBatteryLabel(name, instances)
   return name .. " #" .. tostring(instances[1].pos) .. "+" .. tostring(instances[#instances].pos)
 end
 
--- Renders the 4-row CONNECTED tile:
---   1) battery label
---   2) bar + percent
---   3) "Time left: …"
---   4) "x.xx V/cell   y.y A"
-local function drawConnectedTile(ctx)
-  local zone   = ctx.zone
-  local w, h   = zone.w, zone.h
-  local pad    = sx(2)
-  local blockH = 4 * TH
-  local startY = math.floor((h - blockH) / 2)
-  if startY < 0 then startY = 0 end
+-- ---------------------------------------------------------------------------
+-- CONNECTED tile (screenshot layout): dark panel, large lime readouts, a
+-- segmented battery glyph and a threshold bar. One responsive layout that
+-- scales down through FULL → MEDIUM → SMALL tiers by zone size.
+-- ---------------------------------------------------------------------------
 
-  -- Row 1: battery label
-  local profileName = ctx.selectedProfile and ctx.selectedProfile.name or nil
-  lcd.drawText(pad, startY, formatBatteryLabel(profileName, ctx.selectedInstances))
+-- One font step smaller than `flag` (used to render a value's unit smaller than
+-- its number).
+local function smallerFont(flag)
+  if flag == XXLSIZE then return DBLSIZE end
+  if flag == DBLSIZE then return MIDSIZE end
+  if flag == MIDSIZE then return 0       end
+  return SMLSIZE
+end
 
-  -- Row 2: bar + percent
-  local barY  = startY + TH
-  local barH  = TH - sx(4)
-  local barW  = math.floor(w * 0.65)
-  lcd.drawRectangle(pad, barY, barW, barH)
-  local restPct = calculateRestPct(ctx)
-  if restPct and restPct > 0 then
-    local fillW = math.floor((barW - 2) * restPct / 100)
-    if fillW > 0 then
-      local warn, crit = getThresholds(ctx)
-      lcd.drawFilledRectangle(pad + 1, barY + 1, fillW, barH - 2, getBarColor(restPct, warn, crit))
+-- Shrinks `flag` step by step until `text` fits within `maxW` (never below SMLSIZE).
+local function fitWidth(text, flag, maxW)
+  while flag ~= SMLSIZE and lcd.sizeText(text, flag) > maxW do
+    flag = smallerFont(flag)
+  end
+  return flag
+end
+
+-- Draws a number with its unit appended in a smaller font, bottom-aligned to the
+-- number. Returns the total drawn width.
+local function drawValueUnit(x, y, value, unit, color, valueFlag, unitFlag)
+  dtext(x, y, value, color, valueFlag)
+  local vw, vh = lcd.sizeText(value, valueFlag)
+  if unit and unit ~= "" then
+    local gap     = sx(3)
+    local uw, uh  = lcd.sizeText(unit, unitFlag)
+    dtext(x + vw + gap, y + (vh - uh), unit, color, unitFlag)
+    return vw + gap + uw
+  end
+  return vw
+end
+
+-- "● Name #N" header: a small accent dot followed by the battery label, drawn at
+-- caption size (SMLSIZE, non-bold) so it is no larger than e.g. "REMAINING".
+local function drawHeaderLabel(x, y, label)
+  local _, th = lcd.sizeText(label, SMLSIZE)   -- text height, to centre the dot
+  local dot   = sx(5)
+  lcd.drawFilledRectangle(x, y + math.floor((th - dot) / 2), dot, dot, COLORS.accent)
+  dtext(x + dot + sx(3), y, label, COLORS.accent, SMLSIZE)
+end
+
+-- Vertical battery glyph: a cap, an outlined body and `nSeg` segments filled from
+-- the bottom up to `pct`, in `color`; the empty part stays on the track colour.
+local function drawBatteryGlyph(x, y, w, h, pct, color)
+  local capH  = math.max(sx(3), math.floor(h * 0.07))
+  local capW  = math.floor(w * 0.45)
+  local bodyY = y + capH
+  local bodyH = h - capH
+  lcd.drawFilledRectangle(x + math.floor((w - capW) / 2), y, capW, capH, COLORS.muted)
+  lcd.drawRectangle(x, bodyY, w, bodyH, COLORS.muted)
+  lcd.drawRectangle(x + 1, bodyY + 1, w - 2, bodyH - 2, COLORS.muted)
+  local inset   = sx(3)
+  local ix, iw  = x + inset, w - 2 * inset
+  local iy, ih  = bodyY + inset, bodyH - 2 * inset
+  local nSeg    = 10                       -- 10 segments → 10% granularity
+  local gap     = sx(1)
+  local filled  = math.floor((pct or 0) / 100 * nSeg + 0.5)
+  -- Gaps go only BETWEEN segments (nSeg-1 of them); the segment area is split into
+  -- nSeg equal rounded slots so the stack is flush at both the top and the bottom.
+  local segArea = ih - (nSeg - 1) * gap
+  for k = 1, nSeg do                       -- k = 1 is the TOP segment
+    local top  = iy + math.floor(segArea * (k - 1) / nSeg + 0.5) + (k - 1) * gap
+    local bot  = iy + math.floor(segArea * k       / nSeg + 0.5) + (k - 1) * gap
+    local segH = bot - top
+    if segH < 1 then segH = 1 end
+    local fromBottom = nSeg - k + 1        -- 1 = bottom segment
+    lcd.drawFilledRectangle(ix, top, iw, segH, (fromBottom <= filled) and color or COLORS.track)
+  end
+end
+
+-- Horizontal threshold bar: track, threshold-coloured fill up to `pct`, yellow/red
+-- tick marks at the warn/crit positions and, when `withLabels`, the WARN caption
+-- ABOVE the bar and the CRIT caption BELOW it — so the two never collide even when
+-- the thresholds sit close together. Caller must leave one text line above and
+-- below the bar.
+local THR_YELLOW = lcd.RGB(255, 180, 0)
+local THR_RED    = lcd.RGB(220,  40, 40)
+local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
+  lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
+  local p     = math.max(0, math.min(100, pct or 0))
+  local fillW = math.floor(w * p / 100)
+  if fillW > 0 then
+    lcd.drawFilledRectangle(x, y, fillW, h, getBarColor(p, warn, crit))
+  end
+  local tickW = math.max(sx(2), 2)
+  local function tick(thr, col)
+    local tx = x + math.floor(w * thr / 100) - math.floor(tickW / 2)
+    lcd.drawFilledRectangle(tx, y - sx(1), tickW, h + sx(2), col)
+  end
+  tick(warn, THR_YELLOW)
+  tick(crit, THR_RED)
+  if withLabels then
+    local _, lh = lcd.sizeText("0", SMLSIZE)
+    local function label(thr, txt, col, ly)
+      local tw = lcd.sizeText(txt, SMLSIZE)
+      local lx = x + math.floor(w * thr / 100) - math.floor(tw / 2)
+      if lx < x then lx = x elseif lx + tw > x + w then lx = x + w - tw end
+      dtext(lx, ly, txt, col, SMLSIZE)
     end
+    label(warn, string.format("WARN %d%%", warn), THR_YELLOW, y - lh - sx(1))  -- above
+    label(crit, string.format("CRIT %d%%", crit), THR_RED,    y + h + sx(2))   -- below
   end
-  local pctText = restPct and string.format("%d%%", math.floor(restPct + 0.5)) or "--%"
-  lcd.drawText(pad + barW + pad, barY, pctText)
+end
 
-  -- Row 3: time left
-  lcd.drawText(pad, startY + 2 * TH, "Time left: " .. formatTimeLeft(ctx))
+-- A metric column: big number+unit (in `bigFlag`, bottom-aligned to `bigBottom`),
+-- then a small caption, a value line and a small sub-line. Both columns share the
+-- same `bigBottom`, so their caption/value/sub rows line up across the tile even
+-- when the two big numbers use different font sizes.
+local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLine, subLine, bigFlag)
+  local _, bigH = lcd.sizeText(big .. unit, bigFlag)
+  drawValueUnit(x, bigBottom - bigH, big, unit, bigColor, bigFlag, smallerFont(bigFlag))
+  local y = bigBottom + sx(1)
+  dtext(x, y, capLine, COLORS.muted, SMLSIZE)
+  local _, capH = lcd.sizeText(capLine, SMLSIZE)
+  y = y + capH + sx(2)
+  dtext(x, y, valLine, COLORS.white, 0)
+  y = y + TH
+  dtext(x, y, subLine, COLORS.muted, SMLSIZE)
+end
 
-  -- Row 4: V/cell + A
-  local vText
-  if ctx.voltage and ctx.cells and ctx.cells > 0 then
-    vText = string.format("%.2f V/cell", ctx.voltage / ctx.cells)
-  else
-    vText = "—.- V/cell"
+-- Colour for the live voltage readout: green/yellow/red from the chemistry's
+-- per-cell loaded-voltage thresholds (voltageWarn/voltageCrit). Falls back to the
+-- accent green when voltage/cells/chemistry are unavailable.
+local function voltageColor(ctx)
+  local profile = ctx.selectedProfile
+  local chem    = profile and CHEMISTRIES[profile.chemistry]
+  if not chem or not chem.voltageWarn or not ctx.voltage or not ctx.cells or ctx.cells <= 0 then
+    return COLORS.accent
   end
-  local aText
-  if ctx.current then
-    aText = string.format("%.1f A", ctx.current)
-  else
-    aText = "—.- A"
+  local vpc = ctx.voltage / ctx.cells
+  if vpc >= chem.voltageWarn then return COLORS.accent end
+  if vpc >= chem.voltageCrit then return THR_YELLOW   end
+  return THR_RED
+end
+
+-- Builds the display strings/colours once for the active CONNECTED metrics.
+local function connectedMetrics(ctx)
+  local restPct    = calculateRestPct(ctx)
+  local warn, crit = getThresholds(ctx)
+  local effective  = effectiveCapacityMah(ctx)
+  -- `used` (telemetry consumed + pre-flight start offset) drives the remaining %
+  -- and the remaining-mAh figure. The CONSUMED display, however, shows only the
+  -- in-flight telemetry value (ctx.capacity) — what the pilot actually drew this
+  -- flight, not the offset for a not-quite-full pack.
+  local used       = (ctx.capacity and ctx.startOffsetMah) and (ctx.capacity + ctx.startOffsetMah) or nil
+  local remaining  = (effective and used) and math.max(0, effective - used) or nil
+  local profile    = ctx.selectedProfile and ctx.selectedProfile.name or nil
+  return {
+    restPct  = restPct,
+    warn     = warn,
+    crit     = crit,
+    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.muted,
+    vColor   = voltageColor(ctx),
+    label    = formatBatteryLabel(profile, ctx.selectedInstances),
+    pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
+    vText    = ctx.voltage and string.format("%.1f", ctx.voltage) or "--.-",
+    vCell    = (ctx.voltage and ctx.cells and ctx.cells > 0)
+               and string.format("%.2f V / cell", ctx.voltage / ctx.cells) or "—.- V / cell",
+    remText  = remaining and string.format("%d mAh", math.floor(remaining + 0.5)) or "-- mAh",
+    ofText   = effective and string.format("of %d mAh", math.floor(effective + 0.5)) or "",
+    consText = ctx.capacity and string.format("%d mAh", math.floor(ctx.capacity + 0.5)) or "-- mAh",
+    timeLeft = ctx.timeLeftStr or formatTimeLeft(ctx),  -- 2 s-throttled snapshot
+  }
+end
+
+-- Remaining-flight-time mini-block: a centred "TIME LEFT" caption above the mm:ss
+-- value. flightTimeBlockH() returns its total height (and the caption height) so
+-- the caller can decide whether it fits and where to centre it.
+local TIME_VAL_FLAG = MIDSIZE
+local function flightTimeBlockH()
+  local _, capH = lcd.sizeText("TIME LEFT", SMLSIZE)
+  local _, valH = lcd.sizeText("00:00", TIME_VAL_FLAG)
+  return capH + sx(1) + valH, capH
+end
+local function drawFlightTimeBlock(cx, top, value)
+  local _, capH = flightTimeBlockH()
+  dtext(cx, top, "TIME LEFT", COLORS.muted, SMLSIZE + CENTER)
+  dtext(cx, top + capH + sx(1), value, COLORS.white, TIME_VAL_FLAG + CENTER)
+end
+
+-- FULL tier: header, two metric columns and the battery glyph. The threshold bar
+-- is added at the bottom only when there is enough free height below the content
+-- (so it appears on roomy half/full-page tiles but not on short/cramped ones).
+local function drawConnectedFull(w, h, m)
+  local pad        = sx(4)
+  drawHeaderLabel(pad, pad, m.label)
+  local _, hdrH    = lcd.sizeText(m.label, SMLSIZE)   -- actual header height (SMLSIZE)
+  local midTop     = pad + hdrH + sx(2)
+  local contentBot = h - pad
+  local midH       = contentBot - midTop
+  local gW         = math.floor(w * 0.19)
+  local gX         = w - pad - gW
+  local colGap     = sx(6)
+  local colW       = math.floor((gX - colGap - pad - colGap) / 2)
+  local maxBigH    = math.floor(midH * 0.5)
+  -- Size the % from a fixed "100%" reference (not the live value) so a single-digit
+  -- reading ("1%") doesn't get a larger font than "67%"/"100%". V is one step
+  -- smaller so % stands out (shrunk further only if its wider text overflows).
+  local pctFlag    = pickFont("100%", colW, maxBigH)
+  local vFlag      = fitWidth(m.vText .. "V", smallerFont(pctFlag), colW)
+  -- Shared bottom edge for both big numbers (= the taller, % one) so the rows
+  -- beneath them align across the two columns.
+  local _, pctH    = lcd.sizeText(m.pctText .. "%", pctFlag)
+  local bigBottom  = midTop + pctH
+  drawMetricBlock(pad, bigBottom, m.pctText, "%", m.pctColor,
+                  "REMAINING", m.remText, m.ofText, pctFlag)
+  drawMetricBlock(pad + colW + colGap, bigBottom, m.vText, "V", m.vColor,
+                  m.vCell, m.consText, "CONSUMED", vFlag)
+  -- Battery glyph height = the metric text block's height, so it ends at the
+  -- bottom of the CONSUMED / "of … mAh" line rather than the full middle area.
+  local _, smlH    = lcd.sizeText("0", SMLSIZE)
+  local textBottom = bigBottom + sx(1) + smlH + sx(2) + TH + smlH
+  drawBatteryGlyph(gX, midTop, gW, textBottom - midTop, m.restPct, m.pctColor)
+  -- Threshold bar pinned to the bottom, only if it fits below the content. With
+  -- labels it needs one text line above (WARN) and one below (CRIT), so the bar
+  -- sits one line up from the bottom to leave room for the CRIT caption.
+  local barH       = sx(8)
+  local roomBelow  = contentBot - textBottom
+  local barTop     = contentBot   -- bottom edge of the area the time block may use
+  if roomBelow >= barH + sx(4) then
+    local withLabels = roomBelow >= barH + 2 * smlH + sx(4)
+    local barY       = contentBot - (withLabels and smlH or 0) - barH
+    drawThresholdBar(pad, barY, w - 2 * pad, barH, m.restPct, m.warn, m.crit, withLabels)
+    barTop = barY - (withLabels and smlH or 0)   -- top of the bar block (incl. WARN label)
   end
-  lcd.drawText(pad,     startY + 3 * TH, vText)
-  lcd.drawText(w - pad, startY + 3 * TH, aText, RIGHT)
+  -- Remaining flight time, centred in the gap between the content and the bar
+  -- (now that the half/full-page layout has the room again).
+  local tlH = flightTimeBlockH()
+  if (barTop - textBottom) >= tlH then
+    local ty = textBottom + math.floor(((barTop - textBottom) - tlH) / 2)
+    drawFlightTimeBlock(math.floor(w / 2), ty, m.timeLeft)
+  end
+end
+
+-- MEDIUM tier: header, % and V side by side with one sub-line each. Compact tier
+-- (narrow tiles) — no threshold bar.
+local function drawConnectedMedium(w, h, m)
+  local pad        = sx(3)
+  drawHeaderLabel(pad, pad, m.label)
+  local hdrH       = TH
+  local midTop     = pad + hdrH
+  local midH       = (h - pad) - midTop
+  local colW       = math.floor((w - 3 * pad) / 2)
+  local leftX, rightX = pad, pad + colW + pad
+  local bigH       = math.floor(midH * 0.6)
+  -- % sized from a fixed "100%" reference (stable across digit counts); V one step
+  -- smaller, matching the FULL tier.
+  local lFlag, _, lH = pickFont("100%", colW, bigH)
+  local rFlag = fitWidth(m.vText .. "V", smallerFont(lFlag), colW)
+  drawValueUnit(leftX,  midTop, m.pctText, "%", m.pctColor, lFlag, smallerFont(lFlag))
+  drawValueUnit(rightX, midTop, m.vText,   "V", m.vColor,   rFlag, smallerFont(rFlag))
+  local subY = midTop + lH + sx(1)
+  dtext(leftX,  subY, m.remText,  COLORS.muted, SMLSIZE)
+  dtext(rightX, subY, m.consText, COLORS.muted, SMLSIZE)
+end
+
+-- SMALL tier: one line "<pct>%  <V>V". No threshold bar.
+local function drawConnectedSmall(w, h, m)
+  local pad   = sx(2)
+  local topH  = (h - pad) - pad
+  local pctS  = m.pctText .. "%"
+  local vS    = m.vText .. "V"
+  local pFlag = pickFont(pctS, math.floor(w * 0.5), topH)
+  dtext(pad, pad, pctS, m.pctColor, pFlag)
+  local vFlag, vw = pickFont(vS, math.floor(w * 0.5), topH)
+  dtext(w - pad - vw, pad, vS, m.vColor, vFlag)
+end
+
+-- Blinking red "receiving" dot in the top-right corner: shown while the link is
+-- up, toggling at 0.5 Hz so the pilot can see fresh telemetry is arriving (and
+-- that the script is running). It stops the instant packets stop (isOnline → false).
+local HEARTBEAT_HALF = 100  -- 1 s on / 1 s off → 0.5 Hz (getTime units, 1/100 s)
+local function drawHeartbeat(ctx)
+  if not isOnline(ctx) then return end
+  if math.floor(getTime() / HEARTBEAT_HALF) % 2 ~= 0 then return end
+  local r = sx(3)
+  lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, THR_RED)
+end
+
+-- Picks the tier by zone size. The threshold bar is only drawn (by the FULL tier)
+-- when enough free height remains below the content. (Time-left and current
+-- readouts are intentionally omitted for now; their calculators remain in the
+-- code for a later step.)
+local function drawConnectedTile(ctx)
+  local w, h = ctx.zone.w, ctx.zone.h
+  local m    = connectedMetrics(ctx)
+  if h >= 110 and w >= 300 then
+    drawConnectedFull(w, h, m)
+  elseif h >= 60 then
+    drawConnectedMedium(w, h, m)
+  else
+    drawConnectedSmall(w, h, m)
+  end
 end
 
 -- Renders a list of strings as vertically-centered horizontally-centered
@@ -716,7 +1026,7 @@ local function drawCenteredLines(ctx, lines)
   local startY = math.floor((h - n * TH) / 2)
   if startY < 0 then startY = 0 end
   for i = 1, n do
-    lcd.drawText(cx, startY + (i - 1) * TH, lines[i], CENTER)
+    dtext(cx, startY + (i - 1) * TH, lines[i], COLORS.white, CENTER)
   end
 end
 
@@ -735,10 +1045,10 @@ local function drawEndedTile(ctx)
   local lf = ctx.lastFlight or {}
 
   -- Row 1: fixed label
-  lcd.drawText(pad, startY, "Flight ended")
+  dtext(pad, startY, "Flight ended", COLORS.accent, BOLD)
 
   -- Row 2: battery label
-  lcd.drawText(pad, startY + TH, formatBatteryLabel(lf.profileName, lf.instances))
+  dtext(pad, startY + TH, formatBatteryLabel(lf.profileName, lf.instances), COLORS.white, 0)
 
   -- Row 3: Used X mAh (Y%) — Y% includes the start offset.
   local usedText
@@ -753,7 +1063,7 @@ local function drawEndedTile(ctx)
   else
     usedText = "Used —"
   end
-  lcd.drawText(pad, startY + 2 * TH, usedText)
+  dtext(pad, startY + 2 * TH, usedText, COLORS.white, 0)
 
   -- Row 4: Last: x.xx V/cell
   local lastText
@@ -762,7 +1072,7 @@ local function drawEndedTile(ctx)
   else
     lastText = "Last: —.- V/cell"
   end
-  lcd.drawText(pad, startY + 3 * TH, lastText)
+  dtext(pad, startY + 3 * TH, lastText, COLORS.muted, 0)
 end
 
 -- Finds the model's profile by id within the global battery library.
@@ -1049,11 +1359,11 @@ end
 local function drawSelectionPopup(ctx)
   local w, h  = ctx.zone.w, ctx.zone.h
   local pad   = sx(2)
-  -- No background fill: the popup draws straight onto the normal widget/theme
-  -- background (EdgeTX repaints it each frame).
+  -- Drawn on top of the dark panel that refresh() already painted, so all text
+  -- uses the panel palette (white rows, accent cursor) for legibility.
 
   local title = ctx.parallel and "SELECT BATTERIES" or "SELECT BATTERY"
-  lcd.drawText(math.floor(w / 2), pad, title, CENTER)
+  dtext(math.floor(w / 2), pad, title, COLORS.accent, CENTER + BOLD)
 
   local firstRow = pad + TH
   local legendY  = h - TH                  -- bottom line reserved for the legend
@@ -1061,13 +1371,13 @@ local function drawSelectionPopup(ctx)
   -- Parallel: once slot 1 is locked in, show it above the slot-2 list.
   if ctx.parallel and ctx.popupSlot == 2 and ctx.slot1Item then
     local s1 = ctx.slot1Item
-    lcd.drawText(pad, firstRow, "Slot1: " .. formatBatteryLabel(s1.profile.name, { { pos = s1.pos } }))
+    dtext(pad, firstRow, "Slot1: " .. formatBatteryLabel(s1.profile.name, { { pos = s1.pos } }), COLORS.muted, 0)
     firstRow = firstRow + TH
   end
 
   local list = activeSelectionList(ctx)
   if #list == 0 then
-    lcd.drawText(pad, firstRow, "No profiles")
+    dtext(pad, firstRow, "No profiles", COLORS.white, 0)
     return
   end
 
@@ -1089,12 +1399,13 @@ local function drawSelectionPopup(ctx)
     local label  = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
     local cyc    = cyclesFor(ctx, item.packId)
     local prefix = (i == cursor) and "> " or "  "
-    lcd.drawText(pad, y, prefix .. label .. " (" .. cyc .. "c)")
+    dtext(pad, y, prefix .. label .. " (" .. cyc .. "c)",
+          (i == cursor) and COLORS.accent or COLORS.white, 0)
     y = y + TH
   end
 
   -- Gesture legend. ASCII only — the EdgeTX font has no arrow glyphs.
-  lcd.drawText(pad, legendY, "ele: up/dn  ail: > OK")
+  dtext(pad, legendY, "ele: up/dn  ail: > OK", COLORS.muted, 0)
 end
 
 -- Generic 2-line error tile.
@@ -1208,6 +1519,7 @@ local function tickImpl(ctx)
     detectBattery(ctx)        -- auto-select for 1 candidate; else sets pendingSelection
     pollSelectionSticks(ctx)  -- stick navigation while a selection popup is open
     evaluateWarnings(ctx)
+    refreshTimeLeft(ctx)      -- snapshot the displayed time-left every 2 s
   end
 end
 
@@ -1294,6 +1606,7 @@ local function drawTile(ctx)
     drawWaitingTile(ctx)
   elseif ctx.state == STATE_CONNECTED then
     drawConnectedTile(ctx)
+    drawHeartbeat(ctx)
   elseif ctx.state == STATE_ENDED then
     drawEndedTile(ctx)
   end
@@ -1302,12 +1615,10 @@ end
 local function refresh(ctx, event, touchEvent)
   tick(ctx)  -- Drive logic in the foreground too (background() won't run then; see tick()).
 
-  -- Optional semi-transparent background. Pilot sets 0–5,
-  -- ×3 → alpha 0/3/6/9/12/15 (0 = invisible, 15 = opaque).
-  local trans = ctx.cfg and ctx.cfg.Transparency or 0
-  if trans > 0 then
-    pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * trans)
-  end
+  -- Always paint the dark panel so the tile looks the same regardless of the radio
+  -- theme/background (matches the reference design). The Transparency option is
+  -- kept for compatibility but currently unused (could later dim this panel).
+  pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLORS.panel)
 
   pcall(drawTile, ctx)
 end
