@@ -829,14 +829,17 @@ end
 -- then a small caption, a value line and a small sub-line. Both columns share the
 -- same `bigBottom`, so their caption/value/sub rows line up across the tile even
 -- when the two big numbers use different font sizes.
-local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLine, subLine, bigFlag)
+local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLine, subLine, bigFlag, colW)
   local _, bigH = lcd.sizeText(big .. unit, bigFlag)
   drawValueUnit(x, bigBottom - bigH, big, unit, bigColor, bigFlag, smallerFont(bigFlag))
   local y = bigBottom + sx(1)
   dtext(x, y, capLine, COLORS.muted, SMLSIZE)
   local _, capH = lcd.sizeText(capLine, SMLSIZE)
   y = y + capH + sx(2)
-  dtext(x, y, valLine, COLORS.white, 0)
+  -- The value line is the only block element in a real font (caption/sub are
+  -- already SMLSIZE), so shrink it to the column on narrow tiles (e.g. a quarter
+  -- page) instead of letting "1500 mAh" spill into the next column.
+  dtext(x, y, valLine, COLORS.white, fitWidth(valLine, 0, colW))
   y = y + TH
   dtext(x, y, subLine, COLORS.muted, SMLSIZE)
 end
@@ -878,7 +881,7 @@ local function connectedMetrics(ctx)
     pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
     vText    = ctx.voltage and string.format("%.1f", ctx.voltage) or "--.-",
     vCell    = (ctx.voltage and ctx.cells and ctx.cells > 0)
-               and string.format("%.2f V / cell", ctx.voltage / ctx.cells) or "—.- V / cell",
+               and string.format("%.2f V/cell", ctx.voltage / ctx.cells) or "—.- V/cell",
     remText  = remaining and string.format("%d mAh", math.floor(remaining + 0.5)) or "-- mAh",
     ofText   = effective and string.format("of %d mAh", math.floor(effective + 0.5)) or "",
     consText = ctx.capacity and string.format("%d mAh", math.floor(ctx.capacity + 0.5)) or "-- mAh",
@@ -901,6 +904,27 @@ local function drawFlightTimeBlock(cx, top, value)
   dtext(cx, top + capH + sx(1), value, COLORS.white, TIME_VAL_FLAG + CENTER)
 end
 
+-- Widest fixed (SMLSIZE) line a metric column must hold, so a column narrower than
+-- this would clip "of 0000 mAh" / "0.00 V/cell".
+local function minColW()
+  return math.max(lcd.sizeText("of 0000 mAh", SMLSIZE),
+                  lcd.sizeText("0.00 V/cell", SMLSIZE))
+end
+
+-- FULL-tier column geometry for a zone width `w`. The two text columns get
+-- priority: the battery glyph is normally 19% of w, but on tight zones it is
+-- narrowed to whatever space is left once both columns clear minColW — so the
+-- glyph is always kept, just slimmer, and never squeezes the readouts. Returns
+-- (colW, glyphW). Shared by the renderer and the tier picker so they never differ.
+local function fullColumns(w)
+  local pad      = sx(4)
+  local colGap   = sx(6)
+  local leftover = w - 2 * pad - 2 * colGap - 2 * minColW()   -- room beyond min columns
+  local gW       = math.max(0, math.min(math.floor(w * 0.19), leftover))
+  local colW     = math.floor((w - 2 * pad - gW - 2 * colGap) / 2)
+  return colW, gW
+end
+
 -- FULL tier: header, two metric columns and the battery glyph. The threshold bar
 -- is added at the bottom only when there is enough free height below the content
 -- (so it appears on roomy half/full-page tiles but not on short/cramped ones).
@@ -911,10 +935,9 @@ local function drawConnectedFull(w, h, m)
   local midTop     = pad + hdrH + sx(2)
   local contentBot = h - pad
   local midH       = contentBot - midTop
-  local gW         = math.floor(w * 0.19)
-  local gX         = w - pad - gW
+  local colW, gW   = fullColumns(w)
   local colGap     = sx(6)
-  local colW       = math.floor((gX - colGap - pad - colGap) / 2)
+  local gX         = w - pad - gW
   local maxBigH    = math.floor(midH * 0.5)
   -- Size the % from a fixed "100%" reference (not the live value) so a single-digit
   -- reading ("1%") doesn't get a larger font than "67%"/"100%". V is one step
@@ -926,14 +949,16 @@ local function drawConnectedFull(w, h, m)
   local _, pctH    = lcd.sizeText(m.pctText .. "%", pctFlag)
   local bigBottom  = midTop + pctH
   drawMetricBlock(pad, bigBottom, m.pctText, "%", m.pctColor,
-                  "REMAINING", m.remText, m.ofText, pctFlag)
+                  "REMAINING", m.remText, m.ofText, pctFlag, colW)
   drawMetricBlock(pad + colW + colGap, bigBottom, m.vText, "V", m.vColor,
-                  m.vCell, m.consText, "CONSUMED", vFlag)
+                  m.vCell, m.consText, "CONSUMED", vFlag, colW)
   -- Battery glyph height = the metric text block's height, so it ends at the
   -- bottom of the CONSUMED / "of … mAh" line rather than the full middle area.
   local _, smlH    = lcd.sizeText("0", SMLSIZE)
   local textBottom = bigBottom + sx(1) + smlH + sx(2) + TH + smlH
-  drawBatteryGlyph(gX, midTop, gW, textBottom - midTop, m.restPct, m.pctColor)
+  if gW > 0 then
+    drawBatteryGlyph(gX, midTop, gW, textBottom - midTop, m.restPct, m.pctColor)
+  end
   -- Threshold bar pinned to the bottom, only if it fits below the content. With
   -- labels it needs one text line above (WARN) and one below (CRIT), so the bar
   -- sits one line up from the bottom to leave room for the CRIT caption.
@@ -1000,14 +1025,31 @@ local function drawHeartbeat(ctx)
   lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, THR_RED)
 end
 
--- Picks the tier by zone size. The threshold bar is only drawn (by the FULL tier)
--- when enough free height remains below the content. (Time-left and current
--- readouts are intentionally omitted for now; their calculators remain in the
--- code for a later step.)
+-- True when the FULL two-column layout fits the zone. Both checks are in absolute
+-- pixels because the fonts do NOT scale with S (only positions do): each column
+-- must be wide enough for its longest fixed (SMLSIZE) line, and the zone tall
+-- enough for header + a MIDSIZE big number + the three sub-rows. Measuring the
+-- real font metrics makes this self-tuning across radios (a quarter page is wider
+-- in pixels on the 800 px MK3 than on a 480 px radio) instead of a magic constant.
+local function connectedFitsFull(w, h)
+  if (fullColumns(w)) < minColW() then return false end
+  local pad     = sx(4)
+  local _, hdrH = lcd.sizeText("0", SMLSIZE)
+  local _, bigH = lcd.sizeText("0", MIDSIZE)
+  local _, smlH = lcd.sizeText("0", SMLSIZE)
+  local needH   = pad + hdrH + sx(2) + bigH + sx(1) + smlH + sx(2) + TH + smlH + pad
+  return h >= needH
+end
+
+-- Picks the tier by what fits the zone. FULL is used whenever its content fits;
+-- the bar's WARN/CRIT labels and the time-left block degrade on their own inside
+-- FULL when the height is tight, so a quarter page shows the same layout as a
+-- full page, just with smaller fonts. Shorter/narrower zones fall back to the
+-- compact MEDIUM/SMALL tiers.
 local function drawConnectedTile(ctx)
   local w, h = ctx.zone.w, ctx.zone.h
   local m    = connectedMetrics(ctx)
-  if h >= 110 and w >= 300 then
+  if connectedFitsFull(w, h) then
     drawConnectedFull(w, h, m)
   elseif h >= 60 then
     drawConnectedMedium(w, h, m)
@@ -1381,8 +1423,24 @@ local function drawSelectionPopup(ctx)
     return
   end
 
+  -- Pre-build the row texts and pick ONE font small enough for the widest of them
+  -- (incl. the "> " cursor prefix) so long names plus the "(Nc)" cycle count fit the
+  -- width instead of being clipped. Only the list rows scale — the title and legend
+  -- keep their fixed size. The row height only tightens when the small font is
+  -- actually used, so roomy popups look exactly as before.
+  local availW  = w - 2 * pad
+  local rows    = {}
+  local rowFlag = 0
+  for i, item in ipairs(list) do
+    local label = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
+    rows[i] = label .. " (" .. cyclesFor(ctx, item.packId) .. "c)"
+    if fitWidth("> " .. rows[i], 0, availW) == SMLSIZE then rowFlag = SMLSIZE end
+  end
+  local _, rowTextH = lcd.sizeText("0", rowFlag)
+  local rowH = (rowFlag == SMLSIZE) and (rowTextH + sx(3)) or TH
+
   local cursor  = ctx.popupCursor or 1
-  local maxRows = math.max(1, math.floor((legendY - firstRow) / TH))
+  local maxRows = math.max(1, math.floor((legendY - firstRow) / rowH))
 
   -- Scrolling window: keep the cursor centred so neighbouring entries stay
   -- visible (you can always tell there are more), the list scrolls underneath.
@@ -1395,13 +1453,9 @@ local function drawSelectionPopup(ctx)
 
   local y = firstRow
   for i = start, last do
-    local item   = list[i]
-    local label  = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
-    local cyc    = cyclesFor(ctx, item.packId)
     local prefix = (i == cursor) and "> " or "  "
-    dtext(pad, y, prefix .. label .. " (" .. cyc .. "c)",
-          (i == cursor) and COLORS.accent or COLORS.white, 0)
-    y = y + TH
+    dtext(pad, y, prefix .. rows[i], (i == cursor) and COLORS.accent or COLORS.white, rowFlag)
+    y = y + rowH
   end
 
   -- Gesture legend. ASCII only — the EdgeTX font has no arrow glyphs.
