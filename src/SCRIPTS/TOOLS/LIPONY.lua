@@ -26,7 +26,6 @@
 local VERSION        = "1.0.0"
 local SCHEMA_VERSION = 1
 local CONFIG_PATH    = "/SCRIPTS/LIPONY/config.lua"
-local STATS_PATH     = "/SCRIPTS/LIPONY/stats.lua"
 local WARN_SOUND     = "/SOUNDS/en/scripts/LIPONY/warn.wav"
 local CRIT_SOUND     = "/SOUNDS/en/scripts/LIPONY/crit.wav"
 
@@ -87,11 +86,9 @@ local function readFile(path)
   return table.concat(parts)
 end
 
--- io.open "w" does NOT truncate on some EdgeTX/simulator builds, so a shorter
--- write would leave the old file's tail behind (a parse error). Pad with trailing
--- newlines — valid whitespace after the table — up to the previous length so the
--- old content is always fully overwritten. Pcall-wrapped so a read-only / full SD
--- card never raises.
+-- io.open "w" does NOT truncate on some EdgeTX/SD builds, so a shorter write would
+-- leave the old tail behind — pad with trailing newlines (valid after the table) up
+-- to the old length. Pcall-wrapped so a full/read-only SD never raises.
 local function writeFile(path, content)
   local old = readFile(path)
   if old and #old > #content then
@@ -121,25 +118,6 @@ local function loadConfig()
   if result.schemaVersion ~= SCHEMA_VERSION then
     return nil, "schema", tostring(result.schemaVersion)
   end
-  return result
-end
-
--- Returns (stats) on success, or (nil, errKind) where errKind is "parse"|"schema".
--- A missing file is NOT an error — it is the legitimate empty start state. A file
--- that exists but cannot be parsed is reported so the caller refuses to overwrite
--- it (no silent reset that would discard the cycle history).
-local function loadStats()
-  local ok, f = pcall(io.open, STATS_PATH, "r")
-  if not ok or not f then
-    return { schemaVersion = SCHEMA_VERSION, instances = {}, archive = {} }
-  end
-  pcall(io.close, f)
-
-  local pok, result = pcall(dofile, STATS_PATH)
-  if not pok or type(result) ~= "table" or type(result.instances) ~= "table" then
-    return nil, "parse"
-  end
-  if result.schemaVersion ~= SCHEMA_VERSION then return nil, "schema" end
   result.archive = result.archive or {}
   return result
 end
@@ -151,6 +129,7 @@ local function defaultConfig()
     nextPackId    = 1,
     defaults      = { warn_pct = 30, crit_pct = 20 },
     batteries     = {},
+    archive       = {},
     models        = {},
   }
 end
@@ -187,7 +166,6 @@ local NAME_MAX = 30
 local S = {
   screen   = SCREEN_MAIN,
   cfg      = nil,
-  stats    = nil,
   err      = nil,
   errDetail = nil,
   cursor   = 1,
@@ -276,24 +254,7 @@ local function drawFieldRow(row, label, value, opts)
   end
 end
 
--- Draws a row from left-to-right segments starting at COL1, so a single element
--- can be highlighted instead of the whole line (used by the Packs page when
--- "dived" into a row). seg.hl: "sel" → INVERS, "edit" → BLINK+INVERS, nil → plain.
-local function drawSegments(row, segments)
-  local x, y = COL1, bodyY(row)
-  for _, seg in ipairs(segments) do
-    local flags = COLOR_THEME_PRIMARY1
-    if seg.hl == "edit" then flags = flags + BLINK + INVERS
-    elseif seg.hl == "sel" then flags = flags + INVERS end
-    lcd.drawText(x, y, seg.text, flags)
-    x = x + (lcd.sizeText and lcd.sizeText(seg.text) or (#seg.text * 6))
-  end
-end
-
--- Action buttons as one horizontal bar pinned just above the footer, separated by
--- a thin line. The button whose cursor index is selected is drawn inverted.
--- `firstItem` is the cursor index of labels[1]; pass the screen's cursor value.
--- Gap (px) between the separator line and the button row.
+-- Gap (px) between the separator line and the bottom button row (see drawButtonBar).
 local BTN_GAP = 8
 
 -- Y of the separator line above the bottom button bar — also the bottom edge of
@@ -327,11 +288,9 @@ local function drawButtonBar(labels, firstItem, cursor)
   end
 end
 
--- Inline hint for the non-obvious PAGE function of the field being edited: a
--- "<PAGE>" key chip (filled, like a hardware button) plus what it does, drawn
--- right-aligned on the edited row.
--- `valueRight` = right edge (px) of the field's value text; the hint is skipped
--- when the value would reach it, so a long Name never overlaps the chip.
+-- Inline "<PAGE>" key-chip hint for the field being edited (PAGE's effect isn't
+-- self-evident), right-aligned. valueRight = right edge of the value text; the hint
+-- is skipped when the value would reach it, so a long Name never overlaps the chip.
 local function drawPageHint(y, action, valueRight)
   local key       = "<PAGE>"
   local kw, kh    = lcd.sizeText(key)
@@ -411,6 +370,35 @@ local function withRetry(writeFn, onDone)
 end
 
 -- ---------------------------------------------------------------------------
+-- Destructive resets (shared by Settings and the config-error recovery)
+-- ---------------------------------------------------------------------------
+
+-- Zeroes every active pack's cycle count and empties the archive, then saves
+-- (which bumps the generation so a running widget picks up the cleared counts on
+-- its next poll). Profiles and models are kept. The RAM mutation is idempotent, so
+-- a withRetry re-run after an SD write failure repeats it harmlessly.
+local function resetStats(onDone)
+  for _, b in ipairs(S.cfg.batteries) do
+    for _, inst in ipairs(b.instances or {}) do inst.cycles = 0 end
+  end
+  S.cfg.archive = {}
+  withRetry(function() return saveConfig(S.cfg) end, onDone)
+end
+
+-- Overwrites config.lua with factory defaults (all batteries, models, archive and
+-- cycle counts erased) and clears any parse/schema error. With a single file the
+-- pack-id counter can safely restart at 1 (defaultConfig) — nothing survives a
+-- reset that a fresh id could collide with.
+local function resetConfig(onDone)
+  local fresh = defaultConfig()
+  withRetry(function() return saveConfig(fresh) end, function()
+    S.cfg              = fresh
+    S.err, S.errDetail = nil, nil
+    if onDone then onDone() end
+  end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Screen: first start
 -- ---------------------------------------------------------------------------
 
@@ -447,13 +435,23 @@ local function drawConfigError()
   else
     lcd.drawText(COL1, bodyY(1), "Parse error in config.lua", COLOR_THEME_PRIMARY1)
   end
-  lcd.drawText(COL1, bodyY(3), "Edit config.lua on PC", COLOR_THEME_PRIMARY1)
-  lcd.drawText(COL1, bodyY(4), "or delete it to reset.", COLOR_THEME_PRIMARY1)
-  drawButtonBar({ "Exit" }, 1, 1)
+  lcd.drawText(COL1, bodyY(3), "Edit config.lua on PC,", COLOR_THEME_PRIMARY1)
+  lcd.drawText(COL1, bodyY(4), "or reset to defaults below.", COLOR_THEME_PRIMARY1)
+  drawButtonBar({ "Reset config", "Exit" }, 1, S.cursor)
 end
 
 local function handleConfigError(e)
-  if isEnter(e) or isExit(e) then return 1 end
+  S.cursor = moveCursor(S.cursor, e, 2)
+  if isEnter(e) then
+    if S.cursor == 1 then
+      openDialog("Reset configuration to defaults? All settings are erased.",
+                 function() resetConfig(function() S.screen = SCREEN_MAIN; S.cursor = 1 end) end)
+    else
+      return 1
+    end
+  elseif isExit(e) then
+    return 1
+  end
   return 0
 end
 
@@ -521,7 +519,7 @@ end
 -- Screen: Defaults editor
 -- ---------------------------------------------------------------------------
 
-local DEF_ITEMS = 6   -- warn, crit, test-warn, test-crit, save, cancel
+local DEF_ITEMS = 8   -- warn, crit, test-warn, test-crit, reset-stats, reset-config, save, cancel
 
 local function defaultsDirty()
   return S.def.warn ~= S.cfg.defaults.warn_pct or S.def.crit ~= S.cfg.defaults.crit_pct
@@ -558,7 +556,9 @@ local function drawDefaults()
                { selected = S.cursor == 2, editing = S.defEditing and S.defField == "crit" })
   drawNavRow(3, btn("Test low sound"), S.cursor == 3)
   drawNavRow(4, btn("Test critical sound"), S.cursor == 4)
-  drawButtonBar({ "Save", "Cancel" }, 5, S.cursor)
+  drawNavRow(5, btn("Reset statistics"), S.cursor == 5)
+  drawNavRow(6, btn("Reset configuration"), S.cursor == 6)
+  drawButtonBar({ "Save", "Cancel" }, 7, S.cursor)
 end
 
 local function handleDefaults(e)
@@ -588,8 +588,14 @@ local function handleDefaults(e)
     elseif S.cursor == 4 then
       playFile(CRIT_SOUND)
     elseif S.cursor == 5 then
-      saveDefaults()
+      openDialog("Reset all statistics? Cycle counts and archive are lost.",
+                 function() resetStats(function() openAlert("Statistics reset") end) end)
     elseif S.cursor == 6 then
+      openDialog("Reset configuration? All batteries and models are erased.",
+                 function() resetConfig(leaveDefaults) end)
+    elseif S.cursor == 7 then
+      saveDefaults()
+    elseif S.cursor == 8 then
       cancelDefaults()
     end
   elseif isExit(e) then
@@ -629,13 +635,6 @@ local function nextPackId(cfg)
   local n = (cfg.nextPackId or 1)
   cfg.nextPackId = n + 1
   return string.format("pack_%04d", n)
-end
-
--- Cycle count for one physical battery, keyed by its stable pack id (0 if none).
-local function cyclesFor(packId)
-  local inst = S.stats and S.stats.instances
-  local e    = packId and inst and inst[packId]
-  return (e and e.cycles) or 0
 end
 
 -- Profiles sorted alphabetically by name (case-insensitive).
@@ -706,8 +705,8 @@ end
 -- Focusable items: name, manufacturer, chemistry, capacity, cells, packs,
 -- warn, crit, [Save], [Cancel], and [Delete] (11, existing profiles only).
 
--- Smallest positive label not yet used by the instance list (B1: a new pack
--- fills the lowest free display number, leaving archived numbers as gaps).
+-- Smallest free display number — a new pack fills the lowest gap left by an
+-- archived one, so #N stays stable.
 local function nextLabel(instances)
   local used = {}
   for _, p in ipairs(instances or {}) do used[p.label or 0] = true end
@@ -726,17 +725,18 @@ local function newProfile()
   -- One placeholder pack (#1); its real pack id is minted on first save.
   local p = { manufacturer = "", name = "", nameAuto = true, chemistry = "LiPo",
               capacityMah = 1300, cells = 6, warn_pct = nil, crit_pct = nil,
-              instances = { { id = nil, label = 1, wear = 0 } } }
+              instances = { { id = nil, label = 1, wear = 0, cycles = 0 } } }
   p.name = genName(p)
   return p
 end
 
--- Deep-copies the instance objects { id, label, wear } so the editor can mutate
--- its working copy without touching the stored profile until save.
+-- Deep-copies the instance objects { id, label, wear, cycles } so the editor can
+-- mutate its working copy without touching the stored profile until save. cycles
+-- now lives on the instance (single-file model), so it is copied along too.
 local function copyInstances(src)
   local out = {}
   for i, p in ipairs(src or {}) do
-    out[i] = { id = p.id, label = p.label, wear = p.wear or 0 }
+    out[i] = { id = p.id, label = p.label, wear = p.wear or 0, cycles = p.cycles or 0 }
   end
   return out
 end
@@ -779,13 +779,10 @@ enterProfile = function(existing)
     S.profIsNew = true
   end
   -- Normalise both copies to label order (identical sort → no spurious "dirty").
+  -- cycles already travel with each instance (copyInstances), so the Packs page can
+  -- show and hand-edit them and the dirty check sees them via instancesEqual.
   sortByLabel(S.prof.instances)
   sortByLabel(S.profOrig.instances)
-  -- Cycle counts live in stats.lua, not the profile; load them onto the working
-  -- copies so they can be shown and hand-edited on the Packs page (synced back to
-  -- stats on save). The baseline copy carries them too, for the dirty check.
-  for _, p in ipairs(S.prof.instances)     do p.cycles = cyclesFor(p.id) end
-  for _, p in ipairs(S.profOrig.instances) do p.cycles = cyclesFor(p.id) end
   S.profCursor  = 1
   S.profEditing = nil
   S.capStep     = 100
@@ -1000,22 +997,12 @@ local function parallelModelsUsing(cfg, id)
   return out
 end
 
--- Writes stats.lua (active cycle counts + the archive of retired packs). The
--- widget owns the active counts and the tool owns the archive; each re-reads the
--- file before writing so it never clobbers the other's part.
-local function writeStats(stats)
-  local content = "-- Lipo-Nanny statistics: active cycle counts + archived packs.\n"
-                  .. "return " .. serialize(stats, "") .. "\n"
-  return writeFile(STATS_PATH, content)
-end
-
--- Retires one instance: moves it from stats.instances into stats.archive, keyed
--- by its stable pack id, keeping the battery's name as a human-readable reference.
-local function archiveInstance(stats, profileName, packId)
-  if not packId then return end
-  local snap = stats.instances[packId]
-  stats.archive[packId] = { name = profileName, cycles = (snap and snap.cycles) or 0 }
-  stats.instances[packId] = nil
+-- Retires one instance into config.archive, keyed by its stable pack id, keeping
+-- the battery's name and last cycle count as a human-readable reference. The cycle
+-- count is read straight off the instance object (single-file model).
+local function archiveInstance(profileName, instance)
+  if not instance or not instance.id then return end
+  S.cfg.archive[instance.id] = { name = profileName, cycles = instance.cycles or 0 }
 end
 
 -- --- save ---
@@ -1037,47 +1024,32 @@ local function gotoBatteries()
   S.cursor = 1
 end
 
--- Mints pack ids for packs the pilot just added (placeholders, id == nil),
--- archives packs removed on the Packs page (present in the stored profile, gone
--- from the working copy), and writes back any hand-edited cycle counts onto
--- stats.instances. Returns true if stats.lua needs a write (something archived or
--- a cycle count changed). Runs once before the retried file writes.
+-- Mints ids for newly added packs (id == nil) and archives packs removed on the
+-- Packs page (in the stored profile, gone from the working copy) into config.archive.
+-- Hand-edited cycle counts ride along on the working instances and are persisted when
+-- the profile is saved back into the library.
 local function reconcileInstances()
   for _, p in ipairs(S.prof.instances) do
     if not p.id then p.id = nextPackId(S.cfg) end
   end
   local kept = {}
   for _, p in ipairs(S.prof.instances) do kept[p.id] = true end
-  local statsDirty = false
-  -- Archive packs removed from the list.
   for _, p in ipairs(S.profOrig.instances) do
     if p.id and not kept[p.id] then
-      archiveInstance(S.stats, S.profOrig.name, p.id)
-      statsDirty = true
+      archiveInstance(S.profOrig.name, p)
     end
   end
-  -- Persist (possibly hand-edited) cycle counts of the kept packs.
-  for _, p in ipairs(S.prof.instances) do
-    local cur  = (S.stats.instances[p.id] and S.stats.instances[p.id].cycles) or 0
-    local want = p.cycles or 0
-    if want ~= cur then
-      S.stats.instances[p.id] = S.stats.instances[p.id] or {}
-      S.stats.instances[p.id].cycles = want
-      statsDirty = true
-    end
-  end
-  return statsDirty
 end
 
--- Persists the edited profile: reconcile packs (ids / archive / cycle edits) into
--- stats, write the profile back into the library, then write stats (only when it
--- changed) followed by the config.
+-- Persists the edited profile: reconcile packs (mint ids / archive removed), write
+-- the profile (including its instances' cycle counts) back into the library, then
+-- save the config.
 local function saveProfile()
   if not validateProfile() then return end
   if S.prof.nameAuto then S.prof.name = genName(S.prof) end
   if S.profIsNew then S.prof.id = nextBatteryId(S.cfg) end
 
-  local statsDirty = reconcileInstances()
+  reconcileInstances()
   local np = copyProfile(S.prof); np.id = S.prof.id
   if S.profIsNew then
     S.cfg.batteries[#S.cfg.batteries + 1] = np
@@ -1086,17 +1058,14 @@ local function saveProfile()
       if b.id == S.prof.id then S.cfg.batteries[i] = np; break end
     end
   end
-  withRetry(function()
-    if statsDirty and not writeStats(S.stats) then return false end
-    return saveConfig(S.cfg)
-  end, gotoBatteries)
+  withRetry(function() return saveConfig(S.cfg) end, gotoBatteries)
 end
 
 -- --- delete (archives the profile and all its packs) ---
 
 local function doDeleteProfile()
   for _, p in ipairs(S.profOrig.instances) do
-    archiveInstance(S.stats, S.profOrig.name, p.id)
+    archiveInstance(S.profOrig.name, p)
   end
   for i, b in ipairs(S.cfg.batteries) do
     if b.id == S.prof.id then
@@ -1104,18 +1073,10 @@ local function doDeleteProfile()
       break
     end
   end
-  withRetry(function()
-    if not writeStats(S.stats) then return false end
-    return saveConfig(S.cfg)
-  end, gotoBatteries)
+  withRetry(function() return saveConfig(S.cfg) end, gotoBatteries)
 end
 
 local function deleteProfile()
-  -- Deleting archives all packs → writes stats. Refuse if stats is unreadable.
-  if S.statsErr then
-    openAlert("stats.lua unreadable — fix on PC")
-    return
-  end
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 then
     openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. " — unassign first")
@@ -1527,7 +1488,6 @@ end
 -- Reason string if the highlighted pack must not be archived, else nil.
 local function packArchiveLocked()
   if #S.prof.instances <= 1 then return "Last pack — delete the profile instead" end
-  if S.statsErr then return "stats.lua unreadable — fix on PC" end
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 and (#S.prof.instances - 1) < 2 then
     return "Used by parallel model(s) " .. table.concat(names, ", ") .. " — keep 2+ packs"
@@ -1582,7 +1542,7 @@ local function drawPacks()
       elseif active then f = f + INVERS end
       lcd.drawText(x, y, text, f)
     end
-    local cyc        = S.statsErr and "?" or tostring(p.cycles or 0)
+    local cyc        = tostring(p.cycles or 0)
     local cycActive  = dived and S.packSub == "cycles"
     local wearActive = dived and S.packSub == "wear"
     local actActive  = dived and S.packSub == "archive"
@@ -1598,7 +1558,7 @@ end
 local function handlePacks(e)
   local packs = S.prof.instances
 
-  -- Editing the cycle count of the dived row (written back to stats on save).
+  -- Editing the cycle count of the dived row (saved with the config on profile save).
   if S.packEditCyc then
     local p = packs[S.packDive]
     if isNext(e) then p.cycles = math.min(9999, (p.cycles or 0) + 1)
@@ -1626,8 +1586,7 @@ local function handlePacks(e)
       S.packSub = PACK_SUBS[idx]
     elseif isEnter(e) then
       if S.packSub == "cycles" then
-        if S.statsErr then openAlert("stats.lua unreadable — fix on PC")
-        else S.packEditCyc = true end
+        S.packEditCyc = true
       elseif S.packSub == "wear" then
         S.packEditWear = true
       else
@@ -1674,10 +1633,6 @@ end
 
 local function init()
   S.cfg, S.err, S.errDetail = loadConfig()
-  S.stats, S.statsErr       = loadStats()
-  -- Keep a usable empty table for reads, but remember the error so writes (which
-  -- would overwrite the unreadable file) stay blocked and cycle counts show "?".
-  if S.statsErr then S.stats = { schemaVersion = SCHEMA_VERSION, instances = {}, archive = {} } end
   S.modelNames = {}
   S.cursor    = 1
   S.dialog    = nil

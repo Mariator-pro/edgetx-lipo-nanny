@@ -25,13 +25,15 @@ local STATE_CONNECTED = 2
 local STATE_ENDED     = 3
 
 local CONFIG_PATH          = "/SCRIPTS/LIPONY/config.lua"
-local STATS_PATH           = "/SCRIPTS/LIPONY/stats.lua"
 local SCHEMA_VERSION       = 1
 local CONFIG_POLL_INTERVAL = 500  -- 5 s in hundredths of a second (getTime())
-local ENDED_TIMEOUT        = 500  -- 5 s without online signal → ENDED
+local ENDED_TIMEOUT        = 500   -- 5 s without online signal → ENDED
+local ENDED_DISPLAY_TIMEOUT = 3000 -- 30 s in ENDED without reconnect → back to WAITING
 local TICK_INTERVAL        = 10   -- 0.1 s; data-processing cadence (10 Hz)
 local TIME_LEFT_INTERVAL   = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
-local REST_VOLTAGE_DELAY   = 100  -- 1 s after CONNECTED before sampling the resting voltage
+local SETTLE_DELAY         = 300  -- 3 s after CONNECTED before sampling the resting voltage
+                                  -- AND before latching consumed mAh — long enough for
+                                  -- stale telemetry from the previous flight to clear
 local ERROR_LIMIT          = 5    -- consecutive tick failures before the widget gives up
 
 -- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
@@ -92,8 +94,8 @@ local CHEMISTRIES = {
   LiPo = {
     chargeVoltage    = 4.20,
     dischargeVoltage = 3.00,
-    voltageWarn      = 3.70,   -- ≥ green, below → yellow
-    voltageCrit      = 3.50,   -- below → red
+    voltageWarn      = 3.70,
+    voltageCrit      = 3.50,
     socCurve = {
       {4.20, 100},
       {4.14,  95},
@@ -150,7 +152,7 @@ local CHEMISTRIES = {
   LiIon = {
     chargeVoltage    = 4.20,
     dischargeVoltage = 2.80,
-    voltageWarn      = 3.20,   -- Li-Ion sags more and cuts off lower than LiPo
+    voltageWarn      = 3.20,
     voltageCrit      = 2.90,
     socCurve = {
       {4.20, 100},
@@ -221,6 +223,7 @@ local function loadConfig()
   if type(result.generation) ~= "number" then
     return nil, "schema"
   end
+  result.archive = result.archive or {}
 
   return result, nil
 end
@@ -258,6 +261,18 @@ local function modelFilename()
   return nil
 end
 
+-- Human-readable name of the ACTIVE model (as shown in EdgeTX's model list) for
+-- display only; the config is still keyed by filename. Falls back to nil when
+-- unavailable. (Named distinctly from the Tools script's modelDisplayName(filename),
+-- which reads the .yml header to resolve names for non-active models too.)
+local function activeModelName()
+  local ok, info = pcall(model.getInfo)
+  if ok and type(info) == "table" and info.name and info.name ~= "" then
+    return info.name
+  end
+  return nil
+end
+
 -- Records which telemetry sensors the model actually has, so the widget can show
 -- a clear "Sensor missing" hint instead of computing on absent values.
 local function checkSensors(ctx)
@@ -290,9 +305,13 @@ local function readTelemetry(ctx)
     ctx.current = i
   end
 
-  -- Capacity: monotonically increasing (reset on battery change is done by the
-  -- state machine). The first value is always accepted.
-  if q >= 0 and (ctx.capacity == nil or q >= ctx.capacity) then
+  -- Capacity (consumed mAh). After a dropout EdgeTX still reports the previous
+  -- flight's high Capa until the new RX sends a fresh (zeroed) frame, so only start
+  -- latching after the SETTLE_DELAY window — by then the stale value is gone. Then
+  -- monotonic up only.
+  if q >= 0 and ctx.state == STATE_CONNECTED
+     and (getTime() - ctx.connectedSinceTime) >= SETTLE_DELAY
+     and (ctx.capacity == nil or q >= ctx.capacity) then
     ctx.capacity = q
   end
 end
@@ -339,6 +358,9 @@ local function pollConfig(ctx)
 
   ctx.configError = nil
   if ctx.lastGeneration ~= config.generation then
+    -- Cycle counts now travel with the config, so adopting the new config also
+    -- refreshes them — a tool-side "Reset statistics" bumps the generation and is
+    -- picked up here without any separate stats reload.
     ctx.config = config
     ctx.lastGeneration = config.generation
   end
@@ -399,7 +421,7 @@ local function captureFlightSummary(ctx)
 end
 
 -- ---------------------------------------------------------------------------
--- Statistics (cycle counter) persistence
+-- Config persistence (cycle-counter write-back)
 -- ---------------------------------------------------------------------------
 
 -- Quotes a string as a Lua literal, escaping the few characters that matter
@@ -460,13 +482,10 @@ local function readFile(path)
   return table.concat(parts)
 end
 
--- Writes content to path. Returns true on success. All I/O is pcall-wrapped so a
--- read-only / full SD card never raises a script error.
---
--- io.open "w" does NOT truncate on some EdgeTX/simulator builds, so a shorter
--- write would leave the old file's tail behind (a parse error). Pad with trailing
--- newlines — valid whitespace after the table — up to the previous length so the
--- old content is always fully overwritten.
+-- Writes content to path, true on success. I/O is pcall-wrapped so a full/read-only
+-- SD never raises. io.open "w" does NOT truncate on some EdgeTX/SD builds, so a
+-- shorter write would leave the old tail behind — pad with trailing newlines (valid
+-- after the table) up to the old length.
 local function writeFile(path, content)
   local old = readFile(path)
   if old and #old > #content then
@@ -479,71 +498,54 @@ local function writeFile(path, content)
   return wok == true
 end
 
--- Loads stats.lua. A missing file is the legitimate empty start state. A file
--- that exists but cannot be parsed is reported via the second return, so the
--- caller refuses to overwrite it — no silent reset that would wipe the cycle
--- history. Stats are not flight-critical, so the flight itself runs either way.
-local function loadStats()
-  local ok, f = pcall(io.open, STATS_PATH, "r")
-  if not ok or not f then
-    return { schemaVersion = SCHEMA_VERSION, instances = {}, archive = {} }
-  end
-  pcall(io.close, f)
-
-  local pok, result = pcall(dofile, STATS_PATH)
-  if not pok or type(result) ~= "table"
-     or result.schemaVersion ~= SCHEMA_VERSION
-     or type(result.instances) ~= "table" then
-    return nil, "parse"
-  end
-  result.archive = result.archive or {}
-  return result
+-- Increments the reload sentinel and writes the whole config back. Same shape and
+-- padding the tool uses, so a self-write is indistinguishable from a tool write.
+-- Returns true on success.
+local function saveConfig(config)
+  config.generation = (config.generation or 0) + 1
+  local content = "-- Lipo-Nanny configuration (auto-generated by the Tools-Script).\n"
+                  .. "return " .. serialize(config, "") .. "\n"
+  return writeFile(CONFIG_PATH, content)
 end
 
 -- Cycle count for one physical battery, keyed by its stable pack id (0 if none).
+-- Cycles now live on the config instances, so this scans the loaded config.
 local function cyclesFor(ctx, packId)
-  local instances = ctx.stats and ctx.stats.instances
-  local entry     = packId and instances and instances[packId]
-  return (entry and entry.cycles) or 0
-end
-
--- Re-reads the on-disk stats and applies the pending cycle bumps to it, so a
--- write never clobbers what the tool changed since the widget started (the
--- archive block, or instances it retired). Returns the merged table, or nil if
--- the file exists but is unreadable — then we must leave it untouched.
-local function mergeStatsForWrite(ctx)
-  local disk = loadStats()      -- missing -> fresh empty; unreadable -> nil
-  if not disk then return nil end
-  for packId, n in pairs(ctx.pendingBumps) do
-    local entry = disk.instances[packId]
-    if not entry then entry = { cycles = 0 }; disk.instances[packId] = entry end
-    entry.cycles = (entry.cycles or 0) + n
+  if not packId or not ctx.config then return 0 end
+  for _, b in ipairs(ctx.config.batteries or {}) do
+    for _, inst in ipairs(b.instances or {}) do
+      if inst.id == packId then return inst.cycles or 0 end
+    end
   end
-  return disk
+  return 0
 end
 
--- Flushes the pending cycle bumps at flight end. Read-modify-write: the file on
--- disk is the source of truth (it may hold archived packs written by the tool),
--- so we re-read it, add our bumps and write it back — never a blind dump of
--- ctx.stats. An unreadable file is left untouched; a failed write also keeps the
--- bumps pending for a later retry. Only here, at flight end, to spare the SD card.
-local function flushStats(ctx)
+-- Flushes pending cycle bumps at flight end (read-modify-write on config.lua, to
+-- spare the SD card): re-read fresh so tool edits elsewhere survive, add each bump
+-- onto its instance, write back. A missing/unreadable config or a failed write keeps
+-- the bumps pending for a retry; a bump for a vanished pack is dropped.
+local function flushCycles(ctx)
   if not next(ctx.pendingBumps) then return end
-  local merged = mergeStatsForWrite(ctx)
-  if not merged then ctx.statsError = true; return end
-  local content = "-- Lipo-Nanny statistics: active cycle counts + archived packs.\n"
-                  .. "return " .. serialize(merged, "") .. "\n"
-  if writeFile(STATS_PATH, content) then
-    ctx.stats        = merged       -- refresh the read cache
-    ctx.pendingBumps = {}
-    ctx.statsError   = false
+  local fresh = loadConfig()
+  if not fresh then return end   -- missing/parse/schema: leave the file + bumps alone
+  for packId, n in pairs(ctx.pendingBumps) do
+    for _, b in ipairs(fresh.batteries or {}) do
+      for _, inst in ipairs(b.instances or {}) do
+        if inst.id == packId then inst.cycles = (inst.cycles or 0) + n end
+      end
+    end
+  end
+  if saveConfig(fresh) then
+    ctx.config         = fresh            -- refresh the read cache (incl. bumped cycles)
+    ctx.lastGeneration = fresh.generation -- our own write; don't re-adopt it next poll
+    ctx.pendingBumps   = {}
   end
 end
 
 -- Called once at the CONNECTED→ENDED transition: records a +1 cycle bump for each
 -- used battery if more than 10% of the profile capacity was drawn this flight
 -- (parallel splits the consumption in half, so both share the same result), then
--- flushes the bumps to disk.
+-- flushes the bumps to config.lua.
 local function finalizeFlight(ctx)
   local profile   = ctx.selectedProfile
   local instances = ctx.selectedInstances
@@ -560,7 +562,7 @@ local function finalizeFlight(ctx)
       end
     end
   end
-  flushStats(ctx)
+  flushCycles(ctx)
 end
 
 -- Drives the WAITING/CONNECTED/ENDED state machine. Must run after
@@ -580,10 +582,10 @@ local function updateStateMachine(ctx)
   elseif ctx.state == STATE_CONNECTED then
     if online then
       ctx.lastTelemetryTime = now
-      -- Resting voltage: captured once, 1 s after connect, so the reading is
-      -- taken at idle rather than under load. Basis for battery detection.
+      -- Resting voltage: captured once, SETTLE_DELAY after connect, so the reading
+      -- is taken at idle rather than under load. Basis for battery detection.
       if ctx.restVoltage == nil and ctx.voltage
-         and (now - ctx.connectedSinceTime) >= REST_VOLTAGE_DELAY then
+         and (now - ctx.connectedSinceTime) >= SETTLE_DELAY then
         ctx.restVoltage = ctx.voltage
       end
       -- Average-current accumulator for time-left: one validated-current
@@ -593,9 +595,18 @@ local function updateStateMachine(ctx)
         ctx.currentSampleCount = ctx.currentSampleCount + 1
       end
     elseif (now - ctx.lastTelemetryTime) >= ENDED_TIMEOUT then
-      captureFlightSummary(ctx)
-      finalizeFlight(ctx)   -- cycle-counter evaluation + statistics write
-      ctx.state = STATE_ENDED
+      if ctx.selectedProfile then
+        captureFlightSummary(ctx)
+        finalizeFlight(ctx)   -- cycle-counter evaluation + statistics write
+        ctx.state     = STATE_ENDED
+        ctx.endedTime = now
+      else
+        -- Telemetry lost before a battery was chosen (settle window or selection
+        -- popup still open) → no flight happened, so clear the popup and go back to
+        -- idle instead of showing "Flight ended".
+        resetFlightState(ctx)
+        ctx.state = STATE_WAITING
+      end
     end
 
   elseif ctx.state == STATE_ENDED then
@@ -605,6 +616,9 @@ local function updateStateMachine(ctx)
       ctx.connectedSinceTime = now
       ctx.lastTelemetryTime  = now
       resetFlightState(ctx)
+    elseif (now - ctx.endedTime) >= ENDED_DISPLAY_TIMEOUT then
+      -- Flight-summary shown long enough with no reconnect → idle again.
+      ctx.state = STATE_WAITING
     end
   end
 end
@@ -1072,27 +1086,82 @@ local function drawCenteredLines(ctx, lines)
   end
 end
 
--- WAITING tile: one centered line.
-local function drawWaitingTile(ctx)
-  drawCenteredLines(ctx, { "Waiting for telemetry…" })
+-- Indeterminate "searching" bar: an accent segment that slides back and forth
+-- (ping-pong) along a track. Pure function of getTime(), no state needed.
+local SPLASH_BAR_PERIOD = 180  -- getTime units (1/100 s) for a full left→right→left cycle
+local function drawSplashBar(x, y, w, h)
+  lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
+  local segW   = math.max(sx(8), math.floor(w * 0.3))
+  local travel = math.max(0, w - segW)
+  local phase  = (getTime() % SPLASH_BAR_PERIOD) / SPLASH_BAR_PERIOD
+  local tri    = (phase < 0.5) and (phase * 2) or (2 - phase * 2)   -- 0→1→0
+  lcd.drawFilledRectangle(x + math.floor(travel * tri), y, segW, h, COLORS.accent)
 end
 
--- ENDED tile: 4-row summary of the just-finished flight.
-local function drawEndedTile(ctx)
+-- "Waiting for telemetry" with 0–3 trailing dots that build up slowly. The line is
+-- centred as if all three dots were present and the dots are drawn left-fixed after
+-- the base text, so the base never jitters as the dots appear.
+local WAIT_BASE     = "Waiting for telemetry"
+local DOT_INTERVAL  = 50   -- getTime units (1/100 s) per dot → ~2 s full cycle
+local function drawWaitingStatus(cx, y)
+  local n      = math.floor(getTime() / DOT_INTERVAL) % 4   -- 0..3
+  local baseW  = lcd.sizeText(WAIT_BASE, SMLSIZE)
+  local fullW  = lcd.sizeText(WAIT_BASE .. "...", SMLSIZE)
+  local startX = cx - math.floor(fullW / 2)
+  dtext(startX, y, WAIT_BASE, COLORS.muted, SMLSIZE)
+  if n > 0 then dtext(startX + baseW, y, string.rep(".", n), COLORS.muted, SMLSIZE) end
+end
+
+-- WAITING tile: a small branding splash — "LIPO-NANNY" in accent, an indeterminate
+-- loading bar, and the status line. Shown for every idle/waiting state (true
+-- WAITING, the post-connect settle window, the popup/flight-end timeouts). Degrades
+-- on short zones: the bar is dropped first, then down to a single centered line.
+local function drawWaitingTile(ctx)
   local w, h   = ctx.zone.w, ctx.zone.h
-  local pad    = sx(2)
-  local blockH = 4 * TH
-  local startY = math.floor((h - blockH) / 2)
-  if startY < 0 then startY = 0 end
-  local lf = ctx.lastFlight or {}
+  local pad    = sx(4)
+  local title  = "LIPO-NANNY"
+  local status = "Waiting for telemetry…"
+  local cx     = math.floor(w / 2)
 
-  -- Row 1: fixed label
-  dtext(pad, startY, "Flight ended", COLORS.accent, BOLD)
+  local titleFlag, _, titleH = pickFont(title, w - 2 * pad, math.floor(h * 0.4))
+  local _, subH = lcd.sizeText(status, SMLSIZE)
+  local barH    = sx(4)
+  local gap     = sx(4)
+  local avail   = h - 2 * pad
 
-  -- Row 2: battery label
-  dtext(pad, startY + TH, formatBatteryLabel(lf.profileName, lf.instances), COLORS.white, 0)
+  if avail >= titleH + gap + barH + gap + subH then
+    local blockH = titleH + gap + barH + gap + subH
+    local top    = math.floor((h - blockH) / 2)
+    local barW   = math.floor(w * 0.7)
+    dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
+    drawSplashBar(math.floor((w - barW) / 2), top + titleH + gap, barW, barH)
+    drawWaitingStatus(cx, top + titleH + gap + barH + gap)
+  elseif avail >= titleH + gap + subH then
+    local blockH = titleH + gap + subH
+    local top    = math.floor((h - blockH) / 2)
+    dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
+    drawWaitingStatus(cx, top + titleH + gap)
+  else
+    drawCenteredLines(ctx, { status })
+  end
+end
 
-  -- Row 3: Used X mAh (Y%) — Y% includes the start offset.
+-- ENDED tile: summary of the just-finished flight. The heading is the battery
+-- label, drawn identically to the live tile (accent dot + name via drawHeaderLabel).
+local function drawEndedTile(ctx)
+  local pad   = sx(4)
+  local lf    = ctx.lastFlight or {}
+  local label = formatBatteryLabel(lf.profileName, lf.instances)
+
+  -- Heading: battery name, same as the CONNECTED tile's header.
+  drawHeaderLabel(pad, pad, label)
+  local _, hdrH = lcd.sizeText(label, SMLSIZE)
+  local y = pad + hdrH + sx(2)
+
+  dtext(pad, y, "Flight ended", COLORS.accent, BOLD)
+  y = y + TH
+
+  -- Used X mAh (Y%) — Y% includes the start offset.
   local usedText
   if lf.usedMah then
     local pctStr = ""
@@ -1105,16 +1174,31 @@ local function drawEndedTile(ctx)
   else
     usedText = "Used —"
   end
-  dtext(pad, startY + 2 * TH, usedText, COLORS.white, 0)
+  dtext(pad, y, usedText, COLORS.white, 0)
+  y = y + TH
 
-  -- Row 4: Last: x.xx V/cell
+  -- Last: x.xx V/cell
   local lastText
   if lf.lastVoltagePerCell then
     lastText = string.format("Last: %.2f V/cell", lf.lastVoltagePerCell)
   else
     lastText = "Last: —.- V/cell"
   end
-  dtext(pad, startY + 3 * TH, lastText, COLORS.muted, 0)
+  dtext(pad, y, lastText, COLORS.muted, 0)
+  y = y + TH
+
+  -- Total cycles of the flown pack(s). finalizeFlight already added this flight's +1
+  -- to the config before we get here, so just read the stored count. Parallel shows
+  -- both packs, e.g. "(16, 8)".
+  local cyclesStr = "—"
+  if lf.instances and #lf.instances > 0 then
+    local parts = {}
+    for _, inst in ipairs(lf.instances) do
+      parts[#parts + 1] = tostring(cyclesFor(ctx, inst.id))
+    end
+    cyclesStr = table.concat(parts, ", ")
+  end
+  dtext(pad, y, "Total pack cycles (" .. cyclesStr .. ")", COLORS.muted, 0)
 end
 
 -- Finds the model's profile by id within the global battery library.
@@ -1337,16 +1421,10 @@ local function autoSelectSlot(ctx)
   return false
 end
 
--- Stick-gesture control for the selection popup. Polled every tick — works in
--- the normal tile without fullscreen, unlike key events (which a widget only
--- receives in fullscreen).
---   Navigate: elevator up/down moves the cursor, one step per deflection
---     (re-armed only after the stick returns to the dead-zone).
---   Confirm: aileron held full-right while the elevator is centred → commit the
---     highlighted entry. The hold keeps it distinct from a quick stick check, and
---     it must be re-armed by recentring the aileron so one held gesture cannot
---     roll through both parallel slots.
--- Flip the signs if a direction feels inverted on hardware.
+-- Stick-gesture control for the selection popup, polled every tick — works in the
+-- normal tile without fullscreen, unlike key events. Elevator up/down moves the
+-- cursor (one step per deflection, re-armed in the dead-zone); aileron held full-
+-- right with elevator centred commits. Flip the signs if a direction feels inverted.
 local function pollSelectionSticks(ctx)
   if not ctx.pendingSelection then return end
 
@@ -1462,8 +1540,41 @@ local function drawSelectionPopup(ctx)
   dtext(pad, legendY, "ele: up/dn  ail: > OK", COLORS.muted, 0)
 end
 
+-- Googly eyes for the brand heading: two white eyes whose pupils roll around and
+-- blink now and then — the "nanny" keeping an eye on your pack. Drawn from
+-- primitives (the EdgeTX font has no emoji). Box (x, y, w, h) sits beside the title.
+local function drawMascotEyes(x, y, w, h)
+  local t     = getTime()
+  local r     = math.max(sx(3), math.floor(h * 0.30))
+  local cy    = y + math.floor(h / 2)
+  local cx1   = x + r
+  local cx2   = cx1 + 2 * r + sx(2)
+  local blink = (t % 250) < 25
+  local ph    = (t % 180) / 180 * 2 * math.pi
+  local dx    = math.floor(math.cos(ph) * r * 0.4)
+  local dy    = math.floor(math.sin(ph) * r * 0.4)
+  for _, cx in ipairs({ cx1, cx2 }) do
+    lcd.drawFilledCircle(cx, cy, r, COLORS.white)
+    if blink then
+      lcd.drawFilledRectangle(cx - r, cy - sx(1), 2 * r, math.max(2, sx(2)), COLORS.panel)
+    else
+      lcd.drawFilledCircle(cx + dx, cy + dy, math.max(1, math.floor(r * 0.5)), COLORS.panel)
+    end
+  end
+end
+
+-- Top-left "LIPO-NANNY" brand heading (accent) shown on the error/info tiles, with
+-- the googly-eyes mascot beside it.
+local function drawBrandHeading(ctx)
+  local pad = sx(4)
+  dtext(pad, pad, "LIPO-NANNY", COLORS.accent, SMLSIZE)
+  local hw, hh = lcd.sizeText("LIPO-NANNY", SMLSIZE)
+  drawMascotEyes(pad + hw + sx(6), pad, sx(20), math.max(hh, sx(14)))
+end
+
 -- Generic 2-line error tile.
 local function drawErrorTile(ctx, line1, line2)
+  drawBrandHeading(ctx)
   drawCenteredLines(ctx, { line1, line2 })
 end
 
@@ -1479,6 +1590,7 @@ local function create(zone, options)
     state = STATE_WAITING,
     lastTelemetryTime = 0,
     connectedSinceTime = 0,
+    endedTime = 0,
     lastTick = 0,
 
     -- Config + reload polling
@@ -1487,12 +1599,9 @@ local function create(zone, options)
     lastGeneration = nil,
     lastConfigPoll = 0,
 
-    -- Stats — loaded below. The widget owns the active cycle counts; the tool owns
-    -- the archive block. pendingBumps holds cycles earned but not yet written
-    -- (survives failed writes for retry); statsError flags an unreadable file we
-    -- must not overwrite.
-    stats = nil,
-    statsError = false,
+    -- Cycle counts live on the config instances. pendingBumps holds cycles earned
+    -- this session but not yet written (survives failed writes for a later retry);
+    -- they are flushed onto config.lua at flight end (read-modify-write).
     pendingBumps = {},
 
     -- Telemetry — last valid values. rawVoltage = latest unvalidated RxBt,
@@ -1542,15 +1651,6 @@ local function create(zone, options)
     -- Last flight summary for ENDED display
     lastFlight = nil,
   }
-  local loaded, statsErr = loadStats()
-  ctx.statsError = statsErr ~= nil
-  if ctx.statsError then
-    -- Keep a usable empty table for reads; the flush path refuses to write while
-    -- statsError is set, so the unreadable file on disk is preserved.
-    ctx.stats = { schemaVersion = SCHEMA_VERSION, instances = {}, archive = {} }
-  else
-    ctx.stats = loaded
-  end
   pollConfig(ctx)
   return ctx
 end
@@ -1625,9 +1725,10 @@ local function drawTile(ctx)
     return
   end
   if ctx.modelError == "missing" then
+    drawBrandHeading(ctx)
     drawCenteredLines(ctx, {
       "Model not configured",
-      '"' .. (modelFilename() or "?") .. '"',
+      '"' .. (activeModelName() or modelFilename() or "?") .. '"',
       "Open Tools/LIPONY",
     })
     return
@@ -1652,6 +1753,7 @@ local function drawTile(ctx)
   -- clears pendingSelection, so the next frame falls through to the live tile.
   if ctx.pendingSelection then
     drawSelectionPopup(ctx)
+    drawHeartbeat(ctx)   -- blink the telemetry dot here too (link is live during selection)
     return
   end
 
@@ -1659,7 +1761,14 @@ local function drawTile(ctx)
   if ctx.state == STATE_WAITING then
     drawWaitingTile(ctx)
   elseif ctx.state == STATE_CONNECTED then
-    drawConnectedTile(ctx)
+    -- Settle window: no resting voltage / battery yet. Reuse the waiting tile instead
+    -- of a CONNECTED tile full of "--" (cellMismatch + popup are handled above, so a
+    -- nil profile here always means "still settling"). Heartbeat still shows the link.
+    if ctx.selectedProfile then
+      drawConnectedTile(ctx)
+    else
+      drawWaitingTile(ctx)
+    end
     drawHeartbeat(ctx)
   elseif ctx.state == STATE_ENDED then
     drawEndedTile(ctx)
