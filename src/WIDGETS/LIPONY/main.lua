@@ -50,17 +50,37 @@ local S     = LCD_W / REF_W
 local TH    = math.floor(18 * S + 0.5)  -- standard line height for default font
 local function sx(v) return math.floor(v * S + 0.5) end
 
--- Fixed dark-panel palette (the widget paints its own background, so it looks the
--- same regardless of the radio theme). The percent value, battery glyph and the
--- threshold bar recolour green/yellow/red via getBarColor(); everything else uses
--- these. RGB values are tuned to the reference screenshot.
-local COLORS = {
-  panel  = lcd.RGB( 18,  20,  18),   -- near-black background
-  accent = lcd.RGB(124, 210,  48),   -- lime green (label, voltage)
-  white  = lcd.RGB(235, 235, 235),   -- primary readouts
-  muted  = lcd.RGB(150, 150, 150),   -- captions / secondary lines
-  track  = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
+-- Two palettes, picked per frame by the "Theme" widget option (see refresh()).
+-- DARK paints its own near-black panel; LIGHT leaves the background transparent
+-- (the radio theme shows through) and draws text black. `accent` is the green at the
+-- "good" end of everything green/yellow/red — the label/brand/cursor AND the %
+-- value, threshold bar, battery glyph and live voltage. It is lime in DARK but a
+-- darker green in LIGHT, for legibility on a bright background; the yellow/red
+-- escalation colours stay the same in both themes. `transparent` skips the panel
+-- paint. (Mascot-eye colours are separate, theme-independent constants below.)
+local DARK = {
+  panel   = lcd.RGB( 18,  20,  18),   -- near-black background
+  accent  = lcd.RGB(124, 210,  48),   -- lime green (label, brand, % / V / glyph "ok")
+  fg      = lcd.RGB(235, 235, 235),   -- primary readouts
+  muted   = lcd.RGB(150, 150, 150),   -- captions / secondary lines
+  track   = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
+  transparent = false,
 }
+local LIGHT = {
+  panel   = nil,                      -- transparent: no panel painted
+  accent  = lcd.RGB(  1, 152,   8),   -- darker green — readable on a bright background
+  fg      = lcd.RGB(  0,   0,   0),   -- black readouts
+  muted   = lcd.RGB( 90,  90,  90),   -- darker grey for light backgrounds
+  track   = lcd.RGB(200, 200, 205),   -- light-grey empty track
+  transparent = true,
+}
+-- Active palette; reassigned each frame in refresh() from ctx.cfg.Theme.
+local COLORS = DARK
+
+-- Mascot-eye colours, theme-independent: a light eyeball with a dark rim/pupil, so it
+-- reads as an eye on both the dark panel and the transparent/light background.
+local EYE_WHITE = lcd.RGB(245, 245, 245)
+local EYE_RIM   = lcd.RGB( 20,  20,  20)
 
 -- Font flags from largest to smallest. XXLSIZE/DBLSIZE/MIDSIZE/SMLSIZE are EdgeTX
 -- globals; 0 is the default font. Used by pickFont() to scale to the zone.
@@ -713,7 +733,7 @@ end
 
 -- Bar-fill color (only the bar changes color, text stays neutral).
 local function getBarColor(restPct, warnPct, critPct)
-  if restPct > warnPct then return COLORS.accent        end   -- green
+  if restPct > warnPct then return COLORS.accent        end   -- green (theme accent)
   if restPct > critPct then return lcd.RGB(255, 180, 0)  end   -- yellow
   return lcd.RGB(220, 40, 40)                                  -- red
 end
@@ -731,9 +751,9 @@ local function formatBatteryLabel(name, instances)
 end
 
 -- ---------------------------------------------------------------------------
--- CONNECTED tile (screenshot layout): dark panel, large lime readouts, a
--- segmented battery glyph and a threshold bar. One responsive layout that
--- scales down through FULL → MEDIUM → SMALL tiers by zone size.
+-- CONNECTED tile (screenshot layout): large lime readouts, a segmented battery
+-- glyph and a threshold bar. One responsive layout that scales down through
+-- FULL → MEDIUM → SMALL tiers by zone size.
 -- ---------------------------------------------------------------------------
 
 -- One font step smaller than `flag` (used to render a value's unit smaller than
@@ -853,14 +873,15 @@ local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLi
   -- The value line is the only block element in a real font (caption/sub are
   -- already SMLSIZE), so shrink it to the column on narrow tiles (e.g. a quarter
   -- page) instead of letting "1500 mAh" spill into the next column.
-  dtext(x, y, valLine, COLORS.white, fitWidth(valLine, 0, colW))
+  dtext(x, y, valLine, COLORS.fg, fitWidth(valLine, 0, colW))
   y = y + TH
   dtext(x, y, subLine, COLORS.muted, SMLSIZE)
 end
 
 -- Colour for the live voltage readout: green/yellow/red from the chemistry's
--- per-cell loaded-voltage thresholds (voltageWarn/voltageCrit). Falls back to the
--- accent green when voltage/cells/chemistry are unavailable.
+-- per-cell loaded-voltage thresholds (voltageWarn/voltageCrit). The green end is the
+-- theme accent (lime in Dark, darker green in Light); yellow/red are fixed. Falls
+-- back to the accent green when voltage/cells/chemistry are unavailable.
 local function voltageColor(ctx)
   local profile = ctx.selectedProfile
   local chem    = profile and CHEMISTRIES[profile.chemistry]
@@ -915,7 +936,7 @@ end
 local function drawFlightTimeBlock(cx, top, value)
   local _, capH = flightTimeBlockH()
   dtext(cx, top, "TIME LEFT", COLORS.muted, SMLSIZE + CENTER)
-  dtext(cx, top + capH + sx(1), value, COLORS.white, TIME_VAL_FLAG + CENTER)
+  dtext(cx, top + capH + sx(1), value, COLORS.fg, TIME_VAL_FLAG + CENTER)
 end
 
 -- Widest fixed (SMLSIZE) line a metric column must hold, so a column narrower than
@@ -1082,7 +1103,7 @@ local function drawCenteredLines(ctx, lines)
   local startY = math.floor((h - n * TH) / 2)
   if startY < 0 then startY = 0 end
   for i = 1, n do
-    dtext(cx, startY + (i - 1) * TH, lines[i], COLORS.white, CENTER)
+    dtext(cx, startY + (i - 1) * TH, lines[i], COLORS.fg, CENTER)
   end
 end
 
@@ -1174,7 +1195,7 @@ local function drawEndedTile(ctx)
   else
     usedText = "Used —"
   end
-  dtext(pad, y, usedText, COLORS.white, 0)
+  dtext(pad, y, usedText, COLORS.fg, 0)
   y = y + TH
 
   -- Last: x.xx V/cell
@@ -1479,8 +1500,8 @@ end
 local function drawSelectionPopup(ctx)
   local w, h  = ctx.zone.w, ctx.zone.h
   local pad   = sx(2)
-  -- Drawn on top of the dark panel that refresh() already painted, so all text
-  -- uses the panel palette (white rows, accent cursor) for legibility.
+  -- Drawn on the background refresh() already set up, using the active palette
+  -- (fg rows, accent cursor) so it tracks the Dark/Light theme.
 
   local title = ctx.parallel and "SELECT BATTERIES" or "SELECT BATTERY"
   dtext(math.floor(w / 2), pad, title, COLORS.accent, CENTER + BOLD)
@@ -1497,7 +1518,7 @@ local function drawSelectionPopup(ctx)
 
   local list = activeSelectionList(ctx)
   if #list == 0 then
-    dtext(pad, firstRow, "No profiles", COLORS.white, 0)
+    dtext(pad, firstRow, "No profiles", COLORS.fg, 0)
     return
   end
 
@@ -1532,7 +1553,7 @@ local function drawSelectionPopup(ctx)
   local y = firstRow
   for i = start, last do
     local prefix = (i == cursor) and "> " or "  "
-    dtext(pad, y, prefix .. rows[i], (i == cursor) and COLORS.accent or COLORS.white, rowFlag)
+    dtext(pad, y, prefix .. rows[i], (i == cursor) and COLORS.accent or COLORS.fg, rowFlag)
     y = y + rowH
   end
 
@@ -1543,6 +1564,9 @@ end
 -- Googly eyes for the brand heading: two white eyes whose pupils roll around and
 -- blink now and then — the "nanny" keeping an eye on your pack. Drawn from
 -- primitives (the EdgeTX font has no emoji). Box (x, y, w, h) sits beside the title.
+-- Theme-independent: a light eyeball with a dark rim + dark pupil, so it reads as a
+-- real eye on both the dark panel and the transparent/light background (the rim is
+-- what makes the light eyeball visible on a light background).
 local function drawMascotEyes(x, y, w, h)
   local t     = getTime()
   local r     = math.max(sx(3), math.floor(h * 0.30))
@@ -1554,11 +1578,12 @@ local function drawMascotEyes(x, y, w, h)
   local dx    = math.floor(math.cos(ph) * r * 0.4)
   local dy    = math.floor(math.sin(ph) * r * 0.4)
   for _, cx in ipairs({ cx1, cx2 }) do
-    lcd.drawFilledCircle(cx, cy, r, COLORS.white)
+    lcd.drawFilledCircle(cx, cy, r, EYE_RIM)             -- dark rim (visible on any bg)
+    lcd.drawFilledCircle(cx, cy, r - 1, EYE_WHITE)       -- light eyeball
     if blink then
-      lcd.drawFilledRectangle(cx - r, cy - sx(1), 2 * r, math.max(2, sx(2)), COLORS.panel)
+      lcd.drawFilledRectangle(cx - r, cy - sx(1), 2 * r, math.max(2, sx(2)), EYE_RIM)
     else
-      lcd.drawFilledCircle(cx + dx, cy + dy, math.max(1, math.floor(r * 0.5)), COLORS.panel)
+      lcd.drawFilledCircle(cx + dx, cy + dy, math.max(1, math.floor(r * 0.5)), EYE_RIM)
     end
   end
 end
@@ -1583,7 +1608,8 @@ local function create(zone, options)
     -- Display zone
     zone = zone,
 
-    -- Widget options (see table at end of file); cfg.Transparency = opacity 0–5.
+    -- Widget options (see table at end of file): cfg.Theme = 1 dark / 2 light,
+    -- cfg.Transparency = milky-overlay strength 0–5.
     cfg = options,
 
     -- State machine
@@ -1778,10 +1804,25 @@ end
 local function refresh(ctx, event, touchEvent)
   tick(ctx)  -- Drive logic in the foreground too (background() won't run then; see tick()).
 
-  -- Always paint the dark panel so the tile looks the same regardless of the radio
-  -- theme/background (matches the reference design). The Transparency option is
-  -- kept for compatibility but currently unused (could later dim this panel).
-  pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLORS.panel)
+  -- Pick the palette for this frame from the "Theme" CHOICE option. EdgeTX CHOICE
+  -- values are 1-based, so "Dark" = 1, "Light" = 2 (confirmed on hardware). refresh()
+  -- is the only draw path and runs one instance at a time, so a module-global active
+  -- palette is safe here. Anything other than 2 (incl. unset) falls back to Dark.
+  COLORS = (ctx.cfg and ctx.cfg.Theme == 2) and LIGHT or DARK
+
+  -- DARK paints its own panel so the tile looks the same on any radio theme; LIGHT
+  -- leaves the background transparent so the radio theme shows through.
+  if not COLORS.transparent then
+    pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLORS.panel)
+  end
+
+  -- Optional milky overlay — Light theme only; Dark always stays solid black.
+  -- Pilot sets 0–5, ×3 → alpha 0/3/6/9/12/15 (0 = invisible, 15 = opaque). Drawn in a
+  -- theme colour over the (transparent) Light background for a frosted look.
+  local trans = ctx.cfg and ctx.cfg.Transparency or 0
+  if COLORS.transparent and trans > 0 then
+    pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * trans)
+  end
 
   pcall(drawTile, ctx)
 end
@@ -1789,6 +1830,10 @@ end
 return {
   name       = "LIPONY",
   options    = {
+    -- Theme dropdown (CHOICE labels are a nested table; the value is the 1-based
+    -- index, so default 1 = "Dark"; needs EdgeTX 2.11+). Transparency = milky overlay
+    -- 0–5 (default 2), applied in the Light theme only (Dark stays solid black).
+    { "Theme", CHOICE, 1, { "Dark", "Light" } },
     { "Transparency", VALUE, 2, 0, 5 },
   },
   create     = create,
