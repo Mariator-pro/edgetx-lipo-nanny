@@ -40,7 +40,8 @@ local ERROR_LIMIT          = 5    -- consecutive tick failures before the widget
 local STICK_STEP        = 500  -- deflection that counts as one cursor step
 local STICK_DEADZONE    = 200  -- back inside this re-arms the next step (edge detection)
 local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
-local CONFIRM_HOLD      = 50   -- 0.5 s hold (hundredths of a second) before commit
+local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit;
+                               -- long enough for the fill-bar confirm animation to read
 
 -- Display scaling: pixel constants are relative to a 480 px reference width
 -- (Boxer / T16 / TX16S MK2), matching EdgeTX's own LVGL 480-baseline.
@@ -61,6 +62,7 @@ local function sx(v) return math.floor(v * S + 0.5) end
 local DARK = {
   panel   = lcd.RGB( 18,  20,  18),   -- near-black background
   accent  = lcd.RGB(124, 210,  48),   -- lime green (label, brand, % / V / glyph "ok")
+  accentDim = lcd.RGB( 45,  80,  18), -- muted green: confirm-hold fill behind accent text
   fg      = lcd.RGB(235, 235, 235),   -- primary readouts
   muted   = lcd.RGB(150, 150, 150),   -- captions / secondary lines
   track   = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
@@ -69,6 +71,7 @@ local DARK = {
 local LIGHT = {
   panel   = nil,                      -- transparent: no panel painted
   accent  = lcd.RGB(  1, 152,   8),   -- darker green — readable on a bright background
+  accentDim = lcd.RGB(190, 235, 175), -- pale green: confirm-hold fill behind accent text
   fg      = lcd.RGB(  0,   0,   0),   -- black readouts
   muted   = lcd.RGB( 90,  90,  90),   -- darker grey for light backgrounds
   track   = lcd.RGB(200, 200, 205),   -- light-grey empty track
@@ -1566,15 +1569,30 @@ local function drawSelectionPopup(ctx)
   if start < 1 then start = 1 end
   local last = math.min(#list, start + maxRows - 1)
 
+  -- Confirm-hold progress (0..1): how far through the aileron-held commit we are.
+  -- ctx.confirmSince is set in pollSelectionSticks while the stick is held and cleared
+  -- on release/commit, so this reads non-zero only during an active hold.
+  local confirmProgress = 0
+  if ctx.confirmSince then
+    confirmProgress = (getTime() - ctx.confirmSince) / CONFIRM_HOLD
+    if confirmProgress > 1 then confirmProgress = 1 end
+  end
+
   local y = firstRow
   for i = start, last do
+    -- Hold-to-confirm fill: a muted-green bar grows left→right behind the cursor row
+    -- as the aileron is held, completing when the commit fires. Text drawn over it.
+    if i == cursor and confirmProgress > 0 then
+      lcd.setColor(CUSTOM_COLOR, COLORS.accentDim)
+      lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), CUSTOM_COLOR)
+    end
     local prefix = (i == cursor) and "> " or "  "
     dtext(pad, y, prefix .. rows[i], (i == cursor) and COLORS.accent or COLORS.fg, rowFlag)
     y = y + rowH
   end
 
   -- Gesture legend. ASCII only — the EdgeTX font has no arrow glyphs.
-  dtext(pad, legendY, "ele: up/dn  ail: > OK", COLORS.muted, 0)
+  dtext(pad, legendY, "ele: up/dn  ail: hold >", COLORS.muted, 0)
 end
 
 -- Googly eyes for the brand heading: two white eyes whose pupils roll around and
