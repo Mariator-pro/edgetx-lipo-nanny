@@ -248,11 +248,13 @@ local function loadConfig()
   return result, nil
 end
 
--- Telemetry sensor names (CRSF/ELRS standard, hardcoded).
-local SENSOR_VOLTAGE  = "RxBt"
-local SENSOR_CURRENT  = "Curr"
-local SENSOR_CAPACITY = "Capa"
-local SENSOR_LINK     = "RQly"
+-- Default telemetry sensor names (CRSF/ELRS standard). A model may override these
+-- per the config's sensors block; the resolved names live on ctx (see
+-- syncModelConfig). Keep in sync with the Tools-script DEFAULT_SENSORS.
+local DEFAULT_SENSOR_VOLTAGE  = "RxBt"
+local DEFAULT_SENSOR_CURRENT  = "Curr"
+local DEFAULT_SENSOR_CAPACITY = "Capa"
+local DEFAULT_SENSOR_LINK     = "RQly"
 
 -- Pilot-provided voice files. Missing files just stay silent (playFile no-ops).
 local WARN_SOUND = "/SOUNDS/en/scripts/LIPONY/warn.wav"
@@ -296,20 +298,20 @@ end
 -- Records which telemetry sensors the model actually has, so the widget can show
 -- a clear "Sensor missing" hint instead of computing on absent values.
 local function checkSensors(ctx)
-  ctx.hasRxBt = sensorExists(SENSOR_VOLTAGE)
-  ctx.hasCurr = sensorExists(SENSOR_CURRENT)
-  ctx.hasCapa = sensorExists(SENSOR_CAPACITY)
-  ctx.hasRQly = sensorExists(SENSOR_LINK)
+  ctx.hasRxBt = sensorExists(ctx.sensorVoltage)
+  ctx.hasCurr = sensorExists(ctx.sensorCurrent)
+  ctx.hasCapa = sensorExists(ctx.sensorCapacity)
+  ctx.hasRQly = sensorExists(ctx.sensorLink)
 end
 
 -- Reads the four sensors, applies plausibility filters and keeps the last valid
 -- value on ctx (invalid samples dropped). Voltage validation needs ctx.cells;
 -- rawVoltage is always kept for the online fallback.
 local function readTelemetry(ctx)
-  local v = safeGetValue(SENSOR_VOLTAGE)
-  local i = safeGetValue(SENSOR_CURRENT)
-  local q = safeGetValue(SENSOR_CAPACITY)
-  local l = safeGetValue(SENSOR_LINK)
+  local v = safeGetValue(ctx.sensorVoltage)
+  local i = safeGetValue(ctx.sensorCurrent)
+  local q = safeGetValue(ctx.sensorCapacity)
+  local l = safeGetValue(ctx.sensorLink)
 
   ctx.linkQuality = l
   ctx.rawVoltage  = v
@@ -343,6 +345,13 @@ local function syncModelConfig(ctx)
   ctx.parallel    = false
   ctx.modelError  = nil
 
+  -- Sensor names default to the CRSF standard; a per-model sensors block overrides
+  -- individual ones below. Set unconditionally so they are valid even without config.
+  ctx.sensorVoltage  = DEFAULT_SENSOR_VOLTAGE
+  ctx.sensorCurrent  = DEFAULT_SENSOR_CURRENT
+  ctx.sensorCapacity = DEFAULT_SENSOR_CAPACITY
+  ctx.sensorLink     = DEFAULT_SENSOR_LINK
+
   if not ctx.config or not ctx.config.models then return end
   local filename = modelFilename()
   local modelCfg = filename and ctx.config.models[filename]
@@ -352,6 +361,13 @@ local function syncModelConfig(ctx)
   end
   ctx.cells       = modelCfg.cells
   ctx.parallel    = modelCfg.parallel == true
+  local s = modelCfg.sensors
+  if s then
+    if s.voltage  and s.voltage  ~= "" then ctx.sensorVoltage  = s.voltage  end
+    if s.current  and s.current  ~= "" then ctx.sensorCurrent  = s.current  end
+    if s.capacity and s.capacity ~= "" then ctx.sensorCapacity = s.capacity end
+    if s.link     and s.link     ~= "" then ctx.sensorLink     = s.link     end
+  end
   if not modelCfg.batteryIds or #modelCfg.batteryIds == 0 then
     ctx.modelError = "no_batteries"
   end

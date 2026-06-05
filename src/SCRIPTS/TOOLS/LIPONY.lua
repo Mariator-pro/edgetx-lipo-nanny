@@ -155,10 +155,32 @@ local SCREEN_PACKS        = "packs"
 local SCREEN_MODELS       = "models"
 local SCREEN_MODEL        = "model"
 local SCREEN_ASSIGN       = "assign"
+local SCREEN_SENSORS      = "sensors"
 local SCREEN_DEFAULTS     = "defaults"
 local SCREEN_ABOUT        = "about"
 
 local CHEM_NAMES = { "LiPo", "LiPoHV", "LiIon" }
+
+-- Default telemetry sensor names (CRSF/ELRS). Must stay in sync with the widget's
+-- DEFAULT_SENSOR_* constants. SENSOR_FIELDS drives the per-model sensor-editor rows.
+local DEFAULT_SENSORS = { voltage = "RxBt", current = "Curr", capacity = "Capa", link = "RQly" }
+-- `desc` is the multi-line "what it does + expected values" help shown for the
+-- focused field on the Sensors screen, so the pilot can map it to the right sensor
+-- of their telemetry system.
+local SENSOR_FIELDS = {
+  { key = "voltage",  label = "Voltage", desc = {
+      "Whole-pack voltage (V). Sets SoC % and",
+      "warnings. 4S full ~16.8V, empty ~14.0V." } },
+  { key = "current",  label = "Current", desc = {
+      "Live current draw (A). Feeds the",
+      "remaining-time estimate. e.g. 0-120A." } },
+  { key = "capacity", label = "Capacity", desc = {
+      "Consumed mAh, counts UP from 0 (not %).",
+      "Main warn trigger. 1300mAh pack: 0->1300." } },
+  { key = "link",     label = "Link", desc = {
+      "Link/signal quality for online detect.",
+      "Any value >0 = receiving. e.g. RQly, RSSI." } },
+}
 local CHARSET    = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-+.#"
 local MFR_MAX  = 10
 local NAME_MAX = 30
@@ -1205,6 +1227,39 @@ local function idsEqual(a, b)
   return true
 end
 
+-- Telemetry sensor names of the ACTIVE model (model.getSensor only sees the active
+-- one), de-duplicated, in slot order. Slots can be sparse, so scan the whole range
+-- rather than stopping at the first nil.
+local function modelSensorNames()
+  local names, seen = {}, {}
+  for i = 0, 63 do
+    local ok, s = pcall(model.getSensor, i)
+    if ok and type(s) == "table" and s.name and s.name ~= "" and not seen[s.name] then
+      seen[s.name] = true
+      names[#names + 1] = s.name
+    end
+  end
+  return names
+end
+
+-- True if any sensor field is set to a non-default name (so the model deviates from
+-- the CRSF standard). An unset / empty / default-valued field does not count.
+local function sensorsAreCustom(s)
+  if not s then return false end
+  for _, f in ipairs(SENSOR_FIELDS) do
+    local v = s[f.key]
+    if v and v ~= "" and v ~= DEFAULT_SENSORS[f.key] then return true end
+  end
+  return false
+end
+
+local function sensorsEqual(a, b)
+  for _, f in ipairs(SENSOR_FIELDS) do
+    if ((a and a[f.key]) or "") ~= ((b and b[f.key]) or "") then return false end
+  end
+  return true
+end
+
 -- ---------------------------------------------------------------------------
 -- Screen: Models list
 -- ---------------------------------------------------------------------------
@@ -1270,28 +1325,36 @@ enterModel = function(key)
   if key then
     local m = S.cfg.models[key]
     S.model = { filename = key, cells = m.cells or 6, parallel = m.parallel == true,
-                batteryIds = {} }
+                batteryIds = {}, sensors = {} }
     for _, id in ipairs(m.batteryIds or {}) do S.model.batteryIds[#S.model.batteryIds + 1] = id end
+    if m.sensors then
+      for _, f in ipairs(SENSOR_FIELDS) do S.model.sensors[f.key] = m.sensors[f.key] end
+    end
     S.modelIsNew = false
   else
-    S.model = { filename = active, cells = 6, parallel = false, batteryIds = {} }
+    S.model = { filename = active, cells = 6, parallel = false, batteryIds = {}, sensors = {} }
     S.modelIsNew = true
   end
-  S.modelOrig = { cells = S.model.cells, parallel = S.model.parallel, batteryIds = {} }
+  -- model.getSensor() only enumerates the active model, so non-active models show
+  -- their stored names read-only (see the Sensors sub-screen).
+  S.modelIsActive = S.model.filename == active
+  S.modelOrig = { cells = S.model.cells, parallel = S.model.parallel, batteryIds = {}, sensors = {} }
   for _, id in ipairs(S.model.batteryIds) do S.modelOrig.batteryIds[#S.modelOrig.batteryIds + 1] = id end
+  for _, f in ipairs(SENSOR_FIELDS) do S.modelOrig.sensors[f.key] = S.model.sensors[f.key] end
   S.modelCursor  = 1
   S.modelEditing = false
   S.screen       = SCREEN_MODEL
 end
 
 local function modelItemCount()
-  return S.modelIsNew and 5 or 6
+  return S.modelIsNew and 6 or 7
 end
 
 local function modelDirty()
   return S.model.cells ~= S.modelOrig.cells
       or S.model.parallel ~= S.modelOrig.parallel
       or not idsEqual(S.model.batteryIds, S.modelOrig.batteryIds)
+      or not sensorsEqual(S.model.sensors, S.modelOrig.sensors)
 end
 
 local function drawModel()
@@ -1300,9 +1363,11 @@ local function drawModel()
   drawFieldRow(1, "Cells", S.model.cells .. "S", { selected = S.modelCursor == 1, editing = S.modelEditing })
   drawFieldRow(2, "Parallel packs", S.model.parallel and "Yes" or "No", { selected = S.modelCursor == 2 })
   drawFieldRow(3, "Batteries", #S.model.batteryIds .. " selected", { selected = S.modelCursor == 3, folder = true })
+  drawFieldRow(4, "Sensors", sensorsAreCustom(S.model.sensors) and "custom" or "default",
+               { selected = S.modelCursor == 4, folder = true })
   local actions = S.modelIsNew and { "Save", "Cancel" }
                   or { "Save", "Cancel", "Delete" }
-  drawButtonBar(actions, 4, S.modelCursor)
+  drawButtonBar(actions, 5, S.modelCursor)
 end
 
 local function leaveModel()
@@ -1311,10 +1376,20 @@ local function leaveModel()
 end
 
 local function finishModelSave()
-  S.cfg.models[S.model.filename] = {
+  local entry = {
     cells = S.model.cells, parallel = S.model.parallel,
     batteryIds = S.model.batteryIds,
   }
+  -- Only persist sensors that differ from the CRSF default; an all-default model
+  -- gets no sensors block, so it stays byte-identical to the pre-feature config.
+  if sensorsAreCustom(S.model.sensors) then
+    entry.sensors = {}
+    for _, f in ipairs(SENSOR_FIELDS) do
+      local v = S.model.sensors[f.key]
+      if v and v ~= "" and v ~= DEFAULT_SENSORS[f.key] then entry.sensors[f.key] = v end
+    end
+  end
+  S.cfg.models[S.model.filename] = entry
   withRetry(function() return saveConfig(S.cfg) end, leaveModel)
 end
 
@@ -1364,7 +1439,8 @@ local function cancelModel()
   end
 end
 
-local openAssign   -- forward declaration
+local openAssign    -- forward declaration
+local openSensors   -- forward declaration
 
 local function handleModel(e)
   if S.modelEditing then            -- editing Cells (number)
@@ -1390,10 +1466,12 @@ local function handleModel(e)
     elseif c == 3 then
       openAssign()
     elseif c == 4 then
-      saveModel()
+      openSensors()
     elseif c == 5 then
-      cancelModel()
+      saveModel()
     elseif c == 6 then
+      cancelModel()
+    elseif c == 7 then
       deleteModel()
     end
   elseif isExit(e) then
@@ -1477,6 +1555,112 @@ local function handleAssign(e)
     end
   elseif isExit(e) then
     applyAssign()
+  end
+  return 0
+end
+
+-- ---------------------------------------------------------------------------
+-- Screen: per-model sensor mapping
+-- ---------------------------------------------------------------------------
+-- Lets each model override the four CRSF sensor names. For the active model the
+-- value cycles through the live sensor list (model.getSensor); a non-active model
+-- shows its stored names read-only. S.sensorOpts is { false } .. <sensor names>,
+-- where the false sentinel means "use the CRSF default" (stored as nil).
+
+openSensors = function()
+  S.sensorList = S.modelIsActive and modelSensorNames() or {}
+  S.sensorOpts = { false }
+  for _, n in ipairs(S.sensorList) do S.sensorOpts[#S.sensorOpts + 1] = n end
+  S.sensorCursor  = 1
+  S.sensorEditing = false
+  S.sensorField   = nil
+  S.screen        = SCREEN_SENSORS
+end
+
+local function sensorRowValue(key)
+  local v = S.model.sensors[key]
+  if v and v ~= "" then return v end
+  return DEFAULT_SENSORS[key] .. " (default)"
+end
+
+-- Cursor span: four field rows, then the bottom buttons (Reset only when editable).
+local function sensorItemCount()
+  return S.modelIsActive and 6 or 5
+end
+
+local function sensorOptIndex(v)
+  if not v or v == "" then return 1 end
+  for i = 2, #S.sensorOpts do
+    if S.sensorOpts[i] == v then return i end
+  end
+  return 1
+end
+
+local function leaveSensors()
+  S.screen      = SCREEN_MODEL
+  S.modelCursor = 4
+end
+
+local function drawSensors()
+  drawHeader("SENSORS  " .. modelDisplayName(S.model.filename))
+  -- Up-front caution: these are expert settings; a wrong sensor name silently breaks
+  -- the widget's readings. The four fields follow two rows below.
+  lcd.drawText(COL1, bodyY(1), "Change only if you know what you're doing.", COLOR_THEME_WARNING)
+  lcd.drawText(COL1, bodyY(2), "Wrong sensors will break Lipo-Nanny.", COLOR_THEME_WARNING)
+  for i, f in ipairs(SENSOR_FIELDS) do
+    drawFieldRow(i + 2, f.label, sensorRowValue(f.key), {
+      selected = S.sensorCursor == i,
+      editing  = S.sensorEditing and S.sensorField == f.key,
+      disabled = not S.modelIsActive,
+    })
+  end
+  -- Multi-line description of the focused row (cursor clamped to a field when it sits
+  -- on the bottom buttons, so the help stays put instead of flickering away).
+  local focused = SENSOR_FIELDS[math.min(S.sensorCursor, #SENSOR_FIELDS)]
+  for j, line in ipairs(focused.desc) do
+    lcd.drawText(COL1, bodyY(6 + j), line, COLOR_THEME_DISABLED)
+  end
+  if not S.modelIsActive then
+    lcd.drawText(COL1, bodyY(7 + #focused.desc), "Activate this model to edit sensors.", COLOR_THEME_DISABLED)
+  end
+  local actions = S.modelIsActive and { "Reset to CRSF defaults", "Done" } or { "Done" }
+  drawButtonBar(actions, 5, S.sensorCursor)
+end
+
+local function handleSensors(e)
+  if S.sensorEditing then
+    local key = S.sensorField
+    if isNext(e) or isPrev(e) then
+      local idx = sensorOptIndex(S.model.sensors[key])
+      if isNext(e) then idx = idx % #S.sensorOpts + 1
+      else idx = (idx - 2) % #S.sensorOpts + 1 end
+      local opt = S.sensorOpts[idx]
+      S.model.sensors[key] = opt or nil      -- false sentinel -> default (nil)
+    elseif isEnter(e) then
+      S.sensorEditing = false
+    elseif isExit(e) then
+      S.model.sensors[key] = S.sensorOrig     -- cancel edit
+      S.sensorEditing = false
+    end
+    return 0
+  end
+
+  S.sensorCursor = moveCursor(S.sensorCursor, e, sensorItemCount())
+  if isEnter(e) then
+    local c = S.sensorCursor
+    if c <= 4 then
+      if S.modelIsActive then
+        S.sensorField   = SENSOR_FIELDS[c].key
+        S.sensorOrig    = S.model.sensors[S.sensorField]
+        S.sensorEditing = true
+      end
+    elseif S.modelIsActive and c == 5 then
+      S.model.sensors = {}                   -- reset all four to CRSF default
+    else
+      leaveSensors()                         -- Done
+    end
+  elseif isExit(e) then
+    leaveSensors()
   end
   return 0
 end
@@ -1657,6 +1841,7 @@ local function handleEvent(event)
   if S.screen == SCREEN_MODELS       then return handleModels(event)      end
   if S.screen == SCREEN_MODEL        then return handleModel(event)       end
   if S.screen == SCREEN_ASSIGN       then return handleAssign(event)      end
+  if S.screen == SCREEN_SENSORS      then return handleSensors(event)     end
   if S.screen == SCREEN_DEFAULTS     then return handleDefaults(event)    end
   if S.screen == SCREEN_ABOUT        then return handleAbout(event)       end
   return handleMain(event)
@@ -1680,6 +1865,8 @@ local function draw()
     drawModel()
   elseif S.screen == SCREEN_ASSIGN then
     drawAssign()
+  elseif S.screen == SCREEN_SENSORS then
+    drawSensors()
   elseif S.screen == SCREEN_DEFAULTS then
     drawDefaults()
   elseif S.screen == SCREEN_ABOUT then
