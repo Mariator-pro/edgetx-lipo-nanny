@@ -488,6 +488,7 @@ local function drawMain()
   for i, item in ipairs(MAIN_ITEMS) do
     drawNavRow(i, item, S.cursor == i, { folder = true })
   end
+  drawButtonBar({ "Exit" }, #MAIN_ITEMS + 1, S.cursor)
 end
 
 local function enterDefaults()
@@ -498,8 +499,11 @@ local function enterDefaults()
 end
 
 local function handleMain(e)
-  S.cursor = moveCursor(S.cursor, e, #MAIN_ITEMS)
+  S.cursor = moveCursor(S.cursor, e, #MAIN_ITEMS + 1)
   if isEnter(e) then
+    if S.cursor > #MAIN_ITEMS then
+      return 1                 -- Exit button closes the tool
+    end
     local item = MAIN_ITEMS[S.cursor]
     if item == "Batteries" then
       S.screen = SCREEN_BATTERIES
@@ -511,6 +515,7 @@ local function handleMain(e)
       enterDefaults()
     elseif item == "About" then
       S.screen = SCREEN_ABOUT
+      S.cursor = 1
     end
   elseif isExit(e) then
     return 1
@@ -530,10 +535,11 @@ local function drawAbout()
   lcd.drawText(COL1, bodyY(4), "Tools:  /SCRIPTS/TOOLS/LIPONY.lua", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(5), "Data:   /SCRIPTS/LIPONY/", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(6), "Schema version: " .. SCHEMA_VERSION, COLOR_THEME_PRIMARY1)
+  drawButtonBar({ "Back" }, 1, S.cursor)
 end
 
 local function handleAbout(e)
-  if isExit(e) then S.screen = SCREEN_MAIN; S.cursor = 4 end
+  if isEnter(e) or isExit(e) then S.screen = SCREEN_MAIN; S.cursor = 4 end
   return 0
 end
 
@@ -580,7 +586,7 @@ local function drawDefaults()
   drawNavRow(4, btn("Test critical sound"), S.cursor == 4)
   drawNavRow(5, btn("Reset statistics"), S.cursor == 5)
   drawNavRow(6, btn("Reset configuration"), S.cursor == 6)
-  drawButtonBar({ "Save", "Cancel" }, 7, S.cursor)
+  drawButtonBar({ "Back", "Save" }, 7, S.cursor)
 end
 
 local function handleDefaults(e)
@@ -616,9 +622,9 @@ local function handleDefaults(e)
       openDialog("Reset configuration? All batteries and models are erased.",
                  function() resetConfig(leaveDefaults) end)
     elseif S.cursor == 7 then
-      saveDefaults()
+      cancelDefaults()   -- Back (discard with confirm if dirty)
     elseif S.cursor == 8 then
-      cancelDefaults()
+      saveDefaults()
     end
   elseif isExit(e) then
     cancelDefaults()
@@ -700,16 +706,19 @@ local function drawBatteries()
       drawNavRow(row, items[i].name, S.cursor == i, { folder = true })
     end
   end
-  drawButtonBar({ "[+] Add new" }, #items + 1, S.cursor)
+  drawButtonBar({ "Back", "[+] Add new" }, #items + 1, S.cursor)
 end
 
 local function handleBatteries(e)
   local items = batteryListItems()
-  local count = #items + 1            -- profiles + "[+] Add new"
+  local count = #items + 2            -- profiles + "Back" + "[+] Add new"
   S.cursor = moveCursor(S.cursor, e, count)
   if isEnter(e) then
     if S.cursor <= #items then
       enterProfile(items[S.cursor])
+    elseif S.cursor == #items + 1 then
+      S.screen = SCREEN_MAIN
+      S.cursor = 1
     else
       enterProfile(nil)
     end
@@ -863,11 +872,11 @@ local function buildProfileLines()
   return lines
 end
 
--- Bottom-bar buttons: Save/Cancel always, Delete for an existing profile, and
--- "Reset name" only while the name is a manual override (nameAuto == false) — it
--- reverts to the auto-generated name. The cursor index of labels[i] is 8 + i.
+-- Bottom-bar buttons: Back/Save always (Back leftmost), Delete for an existing
+-- profile, and "Reset name" only while the name is a manual override
+-- (nameAuto == false) — it reverts to the auto-generated name. labels[i] cursor = 8 + i.
 local function profileActions()
-  local acts = { "Save", "Cancel" }
+  local acts = { "Back", "Save" }
   if not S.profIsNew then acts[#acts + 1] = "Delete" end
   if not S.prof.nameAuto then acts[#acts + 1] = "Reset name" end
   return acts
@@ -1150,7 +1159,7 @@ local function handleProfile(e)
     elseif c >= 9 then
       local act = profileActions()[c - 8]
       if act == "Save" then saveProfile()
-      elseif act == "Cancel" then cancelProfile()
+      elseif act == "Back" then cancelProfile()
       elseif act == "Delete" then deleteProfile()
       elseif act == "Reset name" then resetName() end
     end
@@ -1286,28 +1295,34 @@ local function drawModels()
                  S.cursor == i, { folder = true })
     end
   end
-  -- Offer to add the active model when it is not configured yet (pinned bottom bar).
+  -- Bottom bar: always "Back" to the main menu first, then optionally
+  -- "[+] Add current model" (when the active model is not configured yet).
+  local actions = { "Back" }
   if active and not (S.cfg.models and S.cfg.models[active]) then
-    drawButtonBar({ "[+] Add current model" }, #keys + 1, S.cursor)
+    actions[#actions + 1] = "[+] Add current model"
   end
+  drawButtonBar(actions, #keys + 1, S.cursor)
 end
 
 local function modelListCount()
-  local active = modelFilename()
-  local keys   = modelKeys(S.cfg, active)
-  local n      = #keys
-  if active and not (S.cfg.models and S.cfg.models[active]) then n = n + 1 end
-  return n, keys, active
+  local active     = modelFilename()
+  local keys       = modelKeys(S.cfg, active)
+  local addCurrent = active and not (S.cfg.models and S.cfg.models[active])
+  local n          = #keys + (addCurrent and 1 or 0) + 1   -- + "Back"
+  return n, keys, addCurrent
 end
 
 local function handleModels(e)
-  local count, keys, active = modelListCount()
+  local count, keys, addCurrent = modelListCount()
   S.cursor = moveCursor(S.cursor, e, math.max(1, count))
   if isEnter(e) then
     if S.cursor <= #keys then
       enterModel(keys[S.cursor])
-    elseif active then
-      enterModel(nil)            -- add current model
+    elseif S.cursor == #keys + 1 then
+      S.screen = SCREEN_MAIN       -- Back
+      S.cursor = 2
+    elseif addCurrent and S.cursor == #keys + 2 then
+      enterModel(nil)              -- add current model
     end
   elseif isExit(e) then
     S.screen = SCREEN_MAIN
@@ -1365,8 +1380,8 @@ local function drawModel()
   drawFieldRow(3, "Batteries", #S.model.batteryIds .. " selected", { selected = S.modelCursor == 3, folder = true })
   drawFieldRow(4, "Sensors", sensorsAreCustom(S.model.sensors) and "custom" or "default",
                { selected = S.modelCursor == 4, folder = true })
-  local actions = S.modelIsNew and { "Save", "Cancel" }
-                  or { "Save", "Cancel", "Delete" }
+  local actions = S.modelIsNew and { "Back", "Save" }
+                  or { "Back", "Save", "Delete" }
   drawButtonBar(actions, 5, S.modelCursor)
 end
 
@@ -1468,9 +1483,9 @@ local function handleModel(e)
     elseif c == 4 then
       openSensors()
     elseif c == 5 then
-      saveModel()
+      cancelModel()      -- Back (discard with confirm if dirty)
     elseif c == 6 then
-      cancelModel()
+      saveModel()
     elseif c == 7 then
       deleteModel()
     end
@@ -1533,7 +1548,7 @@ local function drawAssign()
     -- Non-selectable profiles (parallel needs 2+ packs) are simply dimmed.
     drawNavRow(i, box .. it.name, S.assignCursor == i, { disabled = not it.selectable })
   end
-  drawButtonBar({ "Done" }, #S.assignItems + 1, S.assignCursor)
+  drawButtonBar({ "Back" }, #S.assignItems + 1, S.assignCursor)
 end
 
 local function handleAssign(e)
@@ -1583,9 +1598,15 @@ local function sensorRowValue(key)
   return DEFAULT_SENSORS[key] .. " (default)"
 end
 
--- Cursor span: four field rows, then the bottom buttons (Reset only when editable).
+-- The "Reset to CRSF defaults" button only makes sense (and is only shown) when the
+-- model is editable AND at least one sensor deviates from the default.
+local function sensorsResetShown()
+  return S.modelIsActive and sensorsAreCustom(S.model.sensors)
+end
+
+-- Cursor span: four field rows, then Back (+ the optional Reset button).
 local function sensorItemCount()
-  return S.modelIsActive and 6 or 5
+  return 5 + (sensorsResetShown() and 1 or 0)
 end
 
 local function sensorOptIndex(v)
@@ -1623,7 +1644,7 @@ local function drawSensors()
   if not S.modelIsActive then
     lcd.drawText(COL1, bodyY(7 + #focused.desc), "Activate this model to edit sensors.", COLOR_THEME_DISABLED)
   end
-  local actions = S.modelIsActive and { "Reset to CRSF defaults", "Done" } or { "Done" }
+  local actions = sensorsResetShown() and { "Back", "Reset to CRSF defaults" } or { "Back" }
   drawButtonBar(actions, 5, S.sensorCursor)
 end
 
@@ -1654,10 +1675,11 @@ local function handleSensors(e)
         S.sensorOrig    = S.model.sensors[S.sensorField]
         S.sensorEditing = true
       end
-    elseif S.modelIsActive and c == 5 then
-      S.model.sensors = {}                   -- reset all four to CRSF default
-    else
-      leaveSensors()                         -- Done
+    elseif c == 5 then
+      leaveSensors()                         -- Back
+    elseif sensorsResetShown() and c == 6 then
+      S.model.sensors = {}                   -- Reset to CRSF defaults
+      S.sensorCursor  = 5                     -- Reset row just vanished; focus Back
     end
   elseif isExit(e) then
     leaveSensors()
@@ -1736,7 +1758,7 @@ local function drawPacks()
     cell(PK_ACT,  "Remove",       actActive, false)
   end
 
-  drawButtonBar({ "[+] Add pack", "Done" }, #packs + 1, S.packsCursor)
+  drawButtonBar({ "Back", "[+] Add pack" }, #packs + 1, S.packsCursor)
 end
 
 local function handlePacks(e)
@@ -1795,15 +1817,15 @@ local function handlePacks(e)
     local c = S.packsCursor
     if c <= #packs then
       S.packDive, S.packSub = c, "cycles"
-    elseif c == #packs + 1 then              -- [+] Add pack
+    elseif c == #packs + 1 then              -- Back
+      S.screen = SCREEN_PROFILE
+    else                                      -- [+] Add pack
       if #packs >= 20 then
         openAlert("Max 20 packs")
       else
         packs[#packs + 1] = { id = nil, label = nextLabel(packs), wear = 0, cycles = 0 }
         sortByLabel(packs)                   -- keep #1,#2,#3 order in the table
       end
-    else                                      -- [Done]
-      S.screen = SCREEN_PROFILE
     end
   elseif isExit(e) then
     S.screen = SCREEN_PROFILE
