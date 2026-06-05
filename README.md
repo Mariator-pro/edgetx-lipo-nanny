@@ -68,6 +68,7 @@ It solves three concrete problems:
 1. **Copy the script files** onto the radio's SD card:
    - `/WIDGETS/LIPONY/main.lua`: the telemetry widget (runtime logic + warnings)
    - `/SCRIPTS/TOOLS/LIPONY.lua`: the configuration tool
+   - `/SCRIPTS/LIPONY/`: an (initially empty) data folder the tool writes `config.lua` into.
 
 2. **Add the voice files** so the warnings are actually spoken. Supply your own WAV files at:
    - `/SOUNDS/en/scripts/LIPONY/warn.wav`: early warning (e.g. *"return to home"*)
@@ -102,6 +103,8 @@ If something's off, the widget tile usually tells you what:
 | `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. |
 
 **No voice warning?** Check that `warn.wav` / `crit.wav` exist and the radio volume is up.
+
+**Tool says "Save failed" on first run?** The data folder `/SCRIPTS/LIPONY/` is missing. Create it on the SD card (EdgeTX/Lua can't create folders itself), then retry.
 
 > More cases and fixes: see [`docs/troubleshooting.md`](docs/troubleshooting.md).
 

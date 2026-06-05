@@ -1,0 +1,3 @@
+# Keeps the Lipo-Nanny data folder in the repo / distribution.
+# The Tools-Script writes config.lua here on first run; EdgeTX Lua cannot create
+# directories, so this folder must already exist on the SD card.
