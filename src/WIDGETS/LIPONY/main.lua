@@ -1777,11 +1777,11 @@ local function drawTile(ctx)
 
   -- Config / model setup problems.
   if ctx.configError == "missing" then
-    drawErrorTile(ctx, "Setup required", "Open Tools/LIPONY")
+    drawErrorTile(ctx, "Setup required", "Open Tools/Lipo Nanny")
     return
   end
   if ctx.configError == "parse" or ctx.configError == "schema" then
-    drawErrorTile(ctx, "Config invalid", "Open Tools/LIPONY")
+    drawErrorTile(ctx, "Config invalid", "Open Tools/Lipo Nanny")
     return
   end
   if ctx.modelError == "missing" then
@@ -1789,12 +1789,12 @@ local function drawTile(ctx)
     drawCenteredLines(ctx, {
       "Model not configured",
       '"' .. (activeModelName() or modelFilename() or "?") .. '"',
-      "Open Tools/LIPONY",
+      "Open Tools/Lipo Nanny",
     })
     return
   end
   if ctx.modelError == "no_batteries" then
-    drawErrorTile(ctx, "No batteries assigned", "Open Tools/LIPONY")
+    drawErrorTile(ctx, "No batteries assigned", "Open Tools/Lipo Nanny")
     return
   end
 
@@ -1804,7 +1804,7 @@ local function drawTile(ctx)
     return
   end
   if ctx.cellMismatch then
-    drawErrorTile(ctx, "Cell count mismatch", "Open Tools/LIPONY")
+    drawErrorTile(ctx, "Cell count mismatch", "Open Tools/Lipo Nanny")
     return
   end
 
