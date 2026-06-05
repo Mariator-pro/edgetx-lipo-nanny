@@ -1,5 +1,4 @@
----- #TNS# "LIPONY"
----- #TNE#
+-- TNS|Lipo Nanny|TNE
 -- =====================================================================
 -- LIPONY.lua  --  EdgeTX Tools Script for Lipo-Nanny configuration
 -- =====================================================================
@@ -181,9 +180,27 @@ local SENSOR_FIELDS = {
       "Link/signal quality for online detect.",
       "Any value >0 = receiving. e.g. RQly, RSSI." } },
 }
-local CHARSET    = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-+.#"
 local MFR_MAX  = 10
 local NAME_MAX = 30
+
+-- Character groups for the ring picker. The active group is tracked in S.charGroup
+-- (not derived from the character), so the rotary cycles within one group and wraps at
+-- its ends, while the MDL key jumps to the next group's `first`. Each group ends in a
+-- space, so spinning left off the first character lands straight on a blank.
+local CHAR_GROUPS = {
+  { label = "ABC",  chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ", first = "A" },
+  { label = "abc",  chars = "abcdefghijklmnopqrstuvwxyz ", first = "a" },
+  { label = "123#", chars = "0123456789-+.# ",            first = "0" },
+}
+
+-- Best-effort group for a character (space lives in every group; first match wins).
+-- Used only to seed S.charGroup when the cursor lands on an existing character.
+local function groupOfChar(ch)
+  for gi, g in ipairs(CHAR_GROUPS) do
+    if string.find(g.chars, ch, 1, true) then return gi end
+  end
+  return 1
+end
 
 local S = {
   screen   = SCREEN_MAIN,
@@ -211,6 +228,14 @@ local function isPrev(e)
 end
 local function isEnter(e) return e == EVT_VIRTUAL_ENTER end
 local function isExit(e)  return e == EVT_VIRTUAL_EXIT end
+
+-- The MDL ("Menu") key switches the char-ring group; on color radios it maps to
+-- EVT_VIRTUAL_MENU (shared by MDL/SYS/MENU). The `or -1` guards a firmware lacking the
+-- constant, so a nil event never matches.
+local EVT_GROUP_SWITCH = EVT_VIRTUAL_MENU or -1
+local function isGroupSwitch(e)
+  return e == EVT_GROUP_SWITCH
+end
 
 -- Moves a 1-based cursor within [1, count], clamped (no wrap).
 local function moveCursor(cur, e, count)
@@ -287,34 +312,39 @@ local function barTopY()
   return LCD_H - (th + 4) - 2 * BTN_GAP
 end
 
--- Bottom button bar: each action is drawn as a real button (outlined box; the
--- selected one filled with the accent colour). `firstItem` is the cursor index of
--- labels[1]; pass the screen's cursor value.
-local function drawButtonBar(labels, firstItem, cursor)
+-- Draws one button at (x, y): outlined, or filled with the accent colour when focused.
+-- Returns its width so callers can lay several out in a row.
+local BTN_PADX = 6
+local function drawButton(x, y, label, focused)
   local _, th = lcd.sizeText("Mg")
-  local btnH  = th + 4
-  local sepY  = barTopY()
-  local btnY  = sepY + BTN_GAP
+  local w     = lcd.sizeText(label) + 2 * BTN_PADX
+  if focused then
+    lcd.drawFilledRectangle(x, y, w, th + 4, COLOR_THEME_FOCUS)
+    lcd.drawText(x + BTN_PADX, y + 2, label, COLOR_THEME_PRIMARY2)
+  else
+    lcd.drawRectangle(x, y, w, th + 4, COLOR_THEME_PRIMARY1)
+    lcd.drawText(x + BTN_PADX, y + 2, label, COLOR_THEME_PRIMARY1)
+  end
+  return w
+end
+
+-- Bottom action bar; `firstItem` is the cursor index of labels[1].
+local function drawButtonBar(labels, firstItem, cursor)
+  local sepY = barTopY()
+  local btnY = sepY + BTN_GAP
   lcd.drawFilledRectangle(PAD, sepY, LCD_W - 2 * PAD, 1, COLOR_THEME_PRIMARY3)
-  local padX, x = 6, PAD
+  local x = PAD
   for i, label in ipairs(labels) do
-    local w   = lcd.sizeText(label) + 2 * padX
-    if cursor == firstItem + i - 1 then
-      lcd.drawFilledRectangle(x, btnY, w, btnH, COLOR_THEME_FOCUS)
-      lcd.drawText(x + padX, btnY + 2, label, COLOR_THEME_PRIMARY2)
-    else
-      lcd.drawRectangle(x, btnY, w, btnH, COLOR_THEME_PRIMARY1)
-      lcd.drawText(x + padX, btnY + 2, label, COLOR_THEME_PRIMARY1)
-    end
+    local w = drawButton(x, btnY, label, cursor == firstItem + i - 1)
     x = x + w + PAD
   end
 end
 
--- Inline "<PAGE>" key-chip hint for the field being edited (PAGE's effect isn't
--- self-evident), right-aligned. valueRight = right edge of the value text; the hint
--- is skipped when the value would reach it, so a long Name never overlaps the chip.
-local function drawPageHint(y, action, valueRight)
-  local key       = "<PAGE>"
+-- Inline key-chip hint for the field being edited (the key's effect isn't self-
+-- evident), right-aligned: a blue chip with the key name plus a description. valueRight
+-- = right edge of the value text; the hint is skipped when the value would reach it, so
+-- a long Name never overlaps the chip.
+local function drawKeyHint(y, key, action, valueRight)
   local kw, kh    = lcd.sizeText(key)
   local aw        = lcd.sizeText(action)
   local x         = LCD_W - PAD - (kw + 4 + 4 + aw)
@@ -425,7 +455,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function drawFirstStart()
-  drawHeader("LIPONY — First start")
+  drawHeader("LIPO NANNY — FIRST START")
   lcd.drawText(COL1, bodyY(1), "No configuration found.", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(2), "Press ENTER to create defaults.", COLOR_THEME_PRIMARY1)
   drawButtonBar({ "Create" }, 1, 1)
@@ -484,7 +514,7 @@ end
 local MAIN_ITEMS = { "Batteries", "Models", "Settings", "About" }
 
 local function drawMain()
-  drawHeader("LIPONY — SETUP")
+  drawHeader("LIPO NANNY — SETUP")
   for i, item in ipairs(MAIN_ITEMS) do
     drawNavRow(i, item, S.cursor == i, { folder = true })
   end
@@ -528,7 +558,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function drawAbout()
-  drawHeader("LIPO-NANNY")
+  drawHeader("ABOUT")
   lcd.drawText(COL1, bodyY(1), "(c) Mariator-pro   GPL-2.0", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(2), "LIPONY  v" .. VERSION, COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(3), "Widget: /WIDGETS/LIPONY/main.lua", COLOR_THEME_PRIMARY1)
@@ -635,9 +665,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Batteries: shared helpers
 -- ---------------------------------------------------------------------------
-
-local function isPageNext(e) return e == EVT_VIRTUAL_NEXT_PAGE end
-local function isPagePrev(e) return e == EVT_VIRTUAL_PREV_PAGE end
 
 -- Auto-generated profile name: "<Manufacturer> <S>s <Chemistry> <mAh>mAh"
 -- e.g. "Tattu 6s LiPo 1300mAh".
@@ -814,11 +841,13 @@ enterProfile = function(existing)
   -- show and hand-edit them and the dirty check sees them via instancesEqual.
   sortByLabel(S.prof.instances)
   sortByLabel(S.profOrig.instances)
-  S.profCursor  = 1
-  S.profEditing = nil
-  S.capStep     = 100
-  S.textBuf     = nil
-  S.screen      = SCREEN_PROFILE
+  S.profCursor   = 1
+  S.profEditing  = nil
+  S.capStep      = 100
+  S.textBuf      = nil
+  S.textCharMode = false
+  S.textSnapshot = nil
+  S.screen       = SCREEN_PROFILE
 end
 
 local function leaveProfile()
@@ -831,30 +860,33 @@ local function refreshAutoName()
   if S.prof.nameAuto then S.prof.name = genName(S.prof) end
 end
 
--- Live text-edit buffer with the cursor character in brackets, so the pilot sees
--- which character the roller is changing.
-local function textWithCursor(buf, pos)
-  local ch     = (pos > #buf) and " " or string.sub(buf, pos, pos)
-  local before = string.sub(buf, 1, pos - 1)
-  local after  = (pos < #buf) and string.sub(buf, pos + 1) or ""
-  return before .. "[" .. ch .. "]" .. after
+-- Position-mode cursor range: 1..#buf (existing chars), then an append slot (#buf+1, only
+-- while there's room for more), then a final Done target. These helpers classify S.textPos.
+local function textDoneIndex()
+  local n = #S.textBuf
+  return n + ((n < S.textMax) and 2 or 1)
 end
+local function textIsAppendSlot()
+  return #S.textBuf < S.textMax and S.textPos == #S.textBuf + 1
+end
+local function textIsDone() return S.textPos == textDoneIndex() end
 
--- Builds the display descriptors; each carries its focusable item index plus the
--- kind: a two-column field {label,value}, a `folder` field (opens a sub-page) or
--- a `button`. While a text field is being edited, its value is the live buffer.
+-- Builds the display descriptors; each carries its focusable item index plus the kind: a
+-- two-column field {label,value}, a `folder` field (opens a sub-page) or a `button`. The
+-- edited text field's value is drawn separately by drawEditValue, so here it is just the
+-- live buffer (placeholder; the bracket cursor and Done button are rendered there).
 local function buildProfileLines()
   local p, lines = S.prof, {}
   local function field(item, label, value) lines[#lines + 1] = { item = item, label = label, value = value } end
   local function folder(item, label, value) lines[#lines + 1] = { item = item, label = label, value = value, folder = true } end
 
   if S.profEditing == 1 then
-    field(1, "Name", textWithCursor(S.textBuf, S.textPos))
+    field(1, "Name", S.textBuf)
   else
     field(1, "Name", p.name .. (p.nameAuto and "  (auto)" or ""))
   end
   if S.profEditing == 2 then
-    field(2, "Manufacturer", textWithCursor(S.textBuf, S.textPos))
+    field(2, "Manufacturer", S.textBuf)
   else
     field(2, "Manufacturer", p.manufacturer ~= "" and p.manufacturer or "—")
   end
@@ -882,6 +914,128 @@ local function profileActions()
   return acts
 end
 
+-- Character-ring picker shown while a text field is edited: the characters of the
+-- current group (ABC / abc / 123#) are laid out around a circle, the active one boxed.
+-- Spinning the wheel moves the marker around the ring; MDL jumps to the next group.
+-- The centre names the groups and which one is active. Space renders as "_".
+local function drawCharRing(ch)
+  local gi = S.charGroup or groupOfChar(ch)
+  local s  = CHAR_GROUPS[gi].chars
+  local m  = #s
+  local active = string.find(s, ch, 1, true) or 1
+
+  -- Overlay panel: same light background as the rest of the body.
+  local top    = bodyY(3) - 2
+  local bottom = barTopY() - 2
+  lcd.drawFilledRectangle(PAD, top, LCD_W - 2 * PAD, bottom - top, COLOR_THEME_SECONDARY3)
+
+  local _, th = lcd.sizeText("Mg")                  -- glyph height
+  local half  = math.floor(th / 2)
+  local cx = math.floor(LCD_W / 2)
+  local cy = math.floor((top + bottom) / 2)
+  -- Radius leaves room for a glyph centred on the ring plus its marker, so the row of
+  -- characters never spills past the top/bottom edges of the panel.
+  local r  = math.floor((bottom - top) / 2) - half - 6
+
+  for j = 1, m do
+    local ang = 2 * math.pi * (j - 1) / m            -- clockwise, index 1 at the top
+    local px  = cx + math.floor(r * math.sin(ang))
+    local py  = cy - math.floor(r * math.cos(ang))   -- glyph centre on the ring
+    local c   = string.sub(s, j, j)
+    if c == " " then c = "_" end
+    -- Active char: black marker with white glyph; the rest are plain black on the
+    -- light background.
+    if j == active then
+      lcd.drawFilledCircle(px, py, half + 1, COLOR_THEME_PRIMARY1)
+    end
+    local fg = (j == active) and COLOR_THEME_PRIMARY2 or COLOR_THEME_PRIMARY1
+    lcd.drawText(px, py - half, c, fg + CENTER)
+  end
+
+  -- Centre: the group switcher with arrows showing the cycle order MDL steps through.
+  -- The active group is drawn black-on-white like a selected field, the rest plain
+  -- black. (The "MDL switch group" key hint lives up top, by the field row.)
+  local sep   = " > "
+  local total = 0
+  for i, g in ipairs(CHAR_GROUPS) do
+    total = total + lcd.sizeText(g.label) + (i < #CHAR_GROUPS and lcd.sizeText(sep) or 0)
+  end
+  local gx = cx - math.floor(total / 2)
+  local gy = cy - half
+  for idx, g in ipairs(CHAR_GROUPS) do
+    local flags = (idx == gi) and (COLOR_THEME_PRIMARY1 + INVERS) or COLOR_THEME_PRIMARY1
+    lcd.drawText(gx, gy, g.label, flags)
+    gx = gx + lcd.sizeText(g.label)
+    if idx < #CHAR_GROUPS then
+      lcd.drawText(gx, gy, sep, COLOR_THEME_PRIMARY1)
+      gx = gx + lcd.sizeText(sep)
+    end
+  end
+end
+
+-- Draws the live edit value in the field row. The character/slot at the cursor is marked
+-- black (white glyph) -- in char mode that's the char being edited, in position mode the
+-- bracketed slot. Position mode also draws a Done button fixed at the right of the row
+-- (styled like Back/Save). The text occupies the space left of it and, when it would not
+-- fit (long names), shows a window around the active slot with "..." clip markers.
+local INV_FLAGS = COLOR_THEME_PRIMARY1 + INVERS
+local function drawEditValue(y)
+  local buf, pos, n = S.textBuf, S.textPos, #S.textBuf
+
+  -- Tokens for the text portion: each existing char, plus the active append slot.
+  local toks = {}
+  for i = 1, n do
+    local c = string.sub(buf, i, i); if c == " " then c = "_" end
+    if i == pos and S.textCharMode then
+      toks[#toks + 1] = { s = c, f = INV_FLAGS }                 -- char being edited
+    elseif i == pos then
+      toks[#toks + 1] = { s = "[" .. c .. "]", f = INV_FLAGS }   -- selected slot (bracketed)
+    else
+      toks[#toks + 1] = { s = c, f = COLOR_THEME_PRIMARY1 }
+    end
+  end
+  if not S.textCharMode and n < S.textMax and pos == n + 1 then
+    toks[#toks + 1] = { s = "[_]", f = INV_FLAGS }               -- active append slot
+  end
+  for _, t in ipairs(toks) do t.w = lcd.sizeText(t.s) end
+
+  -- Done button (position mode only), fixed at the right edge of the row.
+  local rightEdge = LCD_W - PAD
+  if not S.textCharMode then
+    local doneW = lcd.sizeText("Done") + 2 * BTN_PADX
+    drawButton(rightEdge - doneW, y - 2, "Done", pos == textDoneIndex())
+    rightEdge = rightEdge - doneW - PAD
+  end
+  if #toks == 0 then return end
+
+  -- Window [lo, hi] of tokens around the active one, fitting the text width; "..." marks a
+  -- clipped side (reserved in the width so it never overflows).
+  local availW = rightEdge - COL2
+  local dotsW  = lcd.sizeText("...")
+  local active = math.min(pos, #toks)        -- on Done: keep the tail visible
+  local function winW(lo, hi)
+    local w = 0
+    for i = lo, hi do w = w + toks[i].w end
+    if lo > 1     then w = w + dotsW end
+    if hi < #toks then w = w + dotsW end
+    return w
+  end
+  local lo, hi = active, active
+  while true do
+    local grew = false
+    if lo > 1     and winW(lo - 1, hi) <= availW then lo = lo - 1; grew = true end
+    if hi < #toks and winW(lo, hi + 1) <= availW then hi = hi + 1; grew = true end
+    if not grew then break end
+  end
+
+  local x = COL2
+  if lo > 1 then lcd.drawText(x, y, "...", COLOR_THEME_PRIMARY1); x = x + dotsW end
+  for i = lo, hi do
+    lcd.drawText(x, y, toks[i].s, toks[i].f); x = x + toks[i].w
+  end
+  if hi < #toks then lcd.drawText(x, y, "...", COLOR_THEME_PRIMARY1) end
+end
+
 local function drawProfile()
   drawHeader(S.profIsNew and "ADD BATTERY" or "EDIT BATTERY")
   local lines = buildProfileLines()
@@ -899,19 +1053,27 @@ local function drawProfile()
     local ln  = lines[i]
     local sel = ln.item == S.profCursor
     local row = i - start + 1
-    -- Text fields (1,2) show their bracketed live buffer; don't also blink it.
-    local editing = (S.profEditing == ln.item) and ln.item ~= 1 and ln.item ~= 2
-    drawFieldRow(row, ln.label, ln.value, { selected = sel, editing = editing, folder = ln.folder })
-    if ln.item == S.profEditing then editY = bodyY(row); editVal = ln.value end
+    if S.profEditing == ln.item and (ln.item == 1 or ln.item == 2) then
+      -- Edited text field: plain label, then the value with only the active slot marked.
+      drawFieldRow(row, ln.label, nil, {})
+      drawEditValue(bodyY(row))
+      editY, editVal = bodyY(row), ln.value
+    else
+      local editing = (S.profEditing == ln.item) and ln.item ~= 1 and ln.item ~= 2
+      drawFieldRow(row, ln.label, ln.value, { selected = sel, editing = editing, folder = ln.folder })
+      if ln.item == S.profEditing then editY, editVal = bodyY(row), ln.value end
+    end
   end
   drawButtonBar(profileActions(), 9, S.profCursor)
-  -- Inline PAGE hint for the two fields whose PAGE function isn't self-evident;
-  -- skipped automatically if the value text would reach the chip.
+  -- Key-chip hint for the field being edited; skipped if the value would reach the chip.
   local valueRight = editVal and (COL2 + lcd.sizeText(editVal))
   if editY and S.profEditing == 4 then
-    drawPageHint(editY, "step " .. S.capStep, valueRight)
-  elseif editY and (S.profEditing == 1 or S.profEditing == 2) then
-    drawPageHint(editY, "move cursor", valueRight)
+    drawKeyHint(editY, "MDL", "step " .. S.capStep, valueRight)
+  elseif editY and (S.profEditing == 1 or S.profEditing == 2) and S.textCharMode then
+    -- Char ring: wheel picks the letter, MDL switches the group.
+    local ch = (S.textPos > #S.textBuf) and " " or string.sub(S.textBuf, S.textPos, S.textPos)
+    drawCharRing(ch)
+    drawKeyHint(editY + LINE, "MDL", "switch group")
   end
 end
 
@@ -929,20 +1091,34 @@ local function setChar(buf, pos, ch)
   return string.sub(buf, 1, pos - 1) .. ch .. string.sub(buf, pos + 1)
 end
 
+-- Cycles within the active group (S.charGroup) only and wraps at its ends; switching
+-- groups is done with MDL, never by spinning the wheel past a group boundary.
 local function cycleChar(ch, dir)
-  local i = string.find(CHARSET, ch, 1, true) or 1
+  local g = CHAR_GROUPS[S.charGroup].chars
+  local i = string.find(g, ch, 1, true) or 1
   i = i + dir
-  if i < 1 then i = #CHARSET elseif i > #CHARSET then i = 1 end
-  return string.sub(CHARSET, i, i)
+  if i < 1 then i = #g elseif i > #g then i = 1 end
+  return string.sub(g, i, i)
 end
 
--- Items 1 = Name, 2 = Manufacturer.
+-- Starting character for a freshly opened position: uppercase 'A' for the first
+-- character, lowercase 'a' for any later one (names typically read "Abc...").
+local function defaultChar(pos) return pos == 1 and "A" or "a" end
+
+-- Items 1 = Name, 2 = Manufacturer. Editing opens in position mode (pick a slot with the
+-- wheel); ENTER on a slot opens the char ring, ENTER on Done commits, RTN discards.
 local function startTextEdit(field)
-  S.profEditing = field
-  S.textBuf = (field == 2) and S.prof.manufacturer or S.prof.name
-  S.textMax = (field == 2) and MFR_MAX or NAME_MAX
-  S.textPos = math.max(1, #S.textBuf)
-  if #S.textBuf == 0 then S.textPos = 1 end
+  S.profEditing  = field
+  S.textBuf      = (field == 2) and S.prof.manufacturer or S.prof.name
+  S.textMax      = (field == 2) and MFR_MAX or NAME_MAX
+  S.textPos      = 1
+  S.textCharMode = false
+  S.textSnapshot = nil
+end
+
+local function cancelTextEdit()
+  S.profEditing, S.textBuf = nil, nil
+  S.textCharMode, S.textSnapshot = false, nil
 end
 
 local function commitTextEdit()
@@ -959,22 +1135,46 @@ local function commitTextEdit()
       S.prof.nameAuto = false
     end
   end
-  S.profEditing, S.textBuf = nil, nil
+  cancelTextEdit()
 end
 
 local function handleTextEdit(e)
-  if isNext(e) then
-    S.textBuf = setChar(S.textBuf, S.textPos, cycleChar(charAt(S.textBuf, S.textPos), 1))
-  elseif isPrev(e) then
-    S.textBuf = setChar(S.textBuf, S.textPos, cycleChar(charAt(S.textBuf, S.textPos), -1))
-  elseif isPageNext(e) then
-    S.textPos = math.min(S.textMax, #S.textBuf + 1, S.textPos + 1)
-  elseif isPagePrev(e) then
-    S.textPos = math.max(1, S.textPos - 1)
-  elseif isEnter(e) then
-    commitTextEdit()
-  elseif isExit(e) then
-    S.profEditing, S.textBuf = nil, nil   -- cancel
+  if S.textCharMode then
+    -- Char mode: the ring. Wheel changes the character, MDL switches group.
+    if isNext(e) then
+      S.textBuf = setChar(S.textBuf, S.textPos, cycleChar(charAt(S.textBuf, S.textPos), 1))
+    elseif isPrev(e) then
+      S.textBuf = setChar(S.textBuf, S.textPos, cycleChar(charAt(S.textBuf, S.textPos), -1))
+    elseif isGroupSwitch(e) then
+      S.charGroup = S.charGroup % #CHAR_GROUPS + 1   -- MDL: ABC -> abc -> 123# -> ABC
+      S.textBuf = setChar(S.textBuf, S.textPos, CHAR_GROUPS[S.charGroup].first)
+    elseif isEnter(e) then                           -- accept, then auto-advance one slot
+      S.textSnapshot, S.textCharMode = nil, false
+      S.textPos = math.min(S.textPos + 1, textDoneIndex())
+    elseif isExit(e) then                            -- discard this character's change
+      S.textBuf, S.textSnapshot, S.textCharMode = S.textSnapshot, nil, false
+      S.textPos = math.min(S.textPos, textDoneIndex())
+    end
+  else
+    -- Position mode: the wheel walks the slots, ENTER drills in (or commits on Done).
+    if isNext(e) then
+      S.textPos = math.min(S.textPos + 1, textDoneIndex())
+    elseif isPrev(e) then
+      S.textPos = math.max(1, S.textPos - 1)
+    elseif isEnter(e) then
+      if textIsDone() then
+        commitTextEdit()
+      else
+        S.textSnapshot = S.textBuf
+        if textIsAppendSlot() then   -- new slot is seeded with its default char
+          S.textBuf = setChar(S.textBuf, S.textPos, defaultChar(S.textPos))
+        end
+        S.charGroup = groupOfChar(charAt(S.textBuf, S.textPos))
+        S.textCharMode = true
+      end
+    elseif isExit(e) then
+      cancelTextEdit()
+    end
   end
 end
 
@@ -990,8 +1190,8 @@ local function adjustNumber(e)
     elseif isPrev(e) then idx = (idx - 2) % #CHEM_NAMES + 1 end
     p.chemistry = CHEM_NAMES[idx]
     refreshAutoName()
-  elseif item == 4 then                              -- capacity (PAGE toggles step)
-    if isPageNext(e) or isPagePrev(e) then
+  elseif item == 4 then                              -- capacity (MDL toggles step)
+    if isGroupSwitch(e) then
       S.capStep = (S.capStep == 10 and 100) or (S.capStep == 100 and 1000) or 10
     elseif isNext(e) then p.capacityMah = math.min(50000, p.capacityMah + S.capStep)
     elseif isPrev(e) then p.capacityMah = math.max(10, p.capacityMah - S.capStep) end
@@ -1133,7 +1333,7 @@ local function resetName()
   S.profCursor = 1
 end
 
--- 8 field items, then the bottom-bar buttons (Save/Cancel + maybe Delete/Reset).
+-- 8 field items, then the bottom-bar buttons (Back/Save + maybe Delete/Reset name).
 local function profileItemCount()
   return 8 + #profileActions()
 end
