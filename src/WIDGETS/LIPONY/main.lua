@@ -27,7 +27,7 @@ local STATE_ENDED     = 3
 local CONFIG_PATH          = "/SCRIPTS/LIPONY/config.lua"
 local SCHEMA_VERSION       = 1
 local CONFIG_POLL_INTERVAL = 500  -- 5 s in hundredths of a second (getTime())
-local ENDED_TIMEOUT        = 500   -- 5 s without online signal → ENDED
+local ENDED_TIMEOUT        = 150   -- 1.5 s without online signal → ENDED
 local ENDED_DISPLAY_TIMEOUT = 3000 -- 30 s in ENDED without reconnect → back to WAITING
 local TICK_INTERVAL        = 10   -- 0.1 s; data-processing cadence (10 Hz)
 local TIME_LEFT_INTERVAL   = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
@@ -1126,63 +1126,48 @@ local function drawCenteredLines(ctx, lines)
   end
 end
 
--- Indeterminate "searching" bar: an accent segment that slides back and forth
--- (ping-pong) along a track. Pure function of getTime(), no state needed.
-local SPLASH_BAR_PERIOD = 180  -- getTime units (1/100 s) for a full left→right→left cycle
-local function drawSplashBar(x, y, w, h)
-  lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
-  local segW   = math.max(sx(8), math.floor(w * 0.3))
-  local travel = math.max(0, w - segW)
-  local phase  = (getTime() % SPLASH_BAR_PERIOD) / SPLASH_BAR_PERIOD
-  local tri    = (phase < 0.5) and (phase * 2) or (2 - phase * 2)   -- 0→1→0
-  lcd.drawFilledRectangle(x + math.floor(travel * tri), y, segW, h, COLORS.accent)
-end
-
--- "Waiting for telemetry" with 0–3 trailing dots that build up slowly. The line is
--- centred as if all three dots were present and the dots are drawn left-fixed after
--- the base text, so the base never jitters as the dots appear.
-local WAIT_BASE     = "Waiting for telemetry"
+-- Status line with 0–3 trailing dots that build up slowly. The base text depends on
+-- the link: "No Battery connected" while waiting for telemetry, "Calculate" once the
+-- link is up and we're settling. The line is centred as if all three dots were
+-- present and the dots are drawn left-fixed after the base text, so the base never
+-- jitters as the dots appear.
+local WAIT_BASE     = "No Battery connected"
+local SETTLE_BASE   = "Calculating"
 local DOT_INTERVAL  = 50   -- getTime units (1/100 s) per dot → ~2 s full cycle
-local function drawWaitingStatus(cx, y)
+local function drawWaitingStatus(cx, y, base)
   local n      = math.floor(getTime() / DOT_INTERVAL) % 4   -- 0..3
-  local baseW  = lcd.sizeText(WAIT_BASE, SMLSIZE)
-  local fullW  = lcd.sizeText(WAIT_BASE .. "...", SMLSIZE)
+  local baseW  = lcd.sizeText(base, SMLSIZE)
+  local fullW  = lcd.sizeText(base .. "...", SMLSIZE)
   local startX = cx - math.floor(fullW / 2)
-  dtext(startX, y, WAIT_BASE, COLORS.muted, SMLSIZE)
+  dtext(startX, y, base, COLORS.muted, SMLSIZE)
   if n > 0 then dtext(startX + baseW, y, string.rep(".", n), COLORS.muted, SMLSIZE) end
 end
 
--- WAITING tile: a small branding splash — "LIPO-NANNY" in accent, an indeterminate
--- loading bar, and the status line. Shown for every idle/waiting state (true
--- WAITING, the post-connect settle window, the popup/flight-end timeouts). Degrades
--- on short zones: the bar is dropped first, then down to a single centered line.
+-- WAITING tile: a small branding splash — "LIPO-NANNY" in accent and the status
+-- line. Shown for every idle/waiting state (true WAITING, the post-connect settle
+-- window, the popup/flight-end timeouts). Degrades on short zones to a single
+-- centered status line.
 local function drawWaitingTile(ctx)
   local w, h   = ctx.zone.w, ctx.zone.h
   local pad    = sx(4)
   local title  = "LIPO-NANNY"
-  local status = "Waiting for telemetry…"
   local cx     = math.floor(w / 2)
+  -- Telemetry is up once we're in the post-connect settle window (CONNECTED, no
+  -- profile yet); only then does the status switch to "Calculate".
+  local base   = (ctx.state == STATE_CONNECTED) and SETTLE_BASE or WAIT_BASE
 
-  local titleFlag, _, titleH = pickFont(title, w - 2 * pad, math.floor(h * 0.4))
-  local _, subH = lcd.sizeText(status, SMLSIZE)
-  local barH    = sx(4)
+  local titleFlag, _, titleH = pickFont(title, w - 2 * pad, math.floor(h * 0.28))
+  local _, subH = lcd.sizeText(base, SMLSIZE)
   local gap     = sx(4)
   local avail   = h - 2 * pad
 
-  if avail >= titleH + gap + barH + gap + subH then
-    local blockH = titleH + gap + barH + gap + subH
-    local top    = math.floor((h - blockH) / 2)
-    local barW   = math.floor(w * 0.7)
-    dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
-    drawSplashBar(math.floor((w - barW) / 2), top + titleH + gap, barW, barH)
-    drawWaitingStatus(cx, top + titleH + gap + barH + gap)
-  elseif avail >= titleH + gap + subH then
+  if avail >= titleH + gap + subH then
     local blockH = titleH + gap + subH
     local top    = math.floor((h - blockH) / 2)
     dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
-    drawWaitingStatus(cx, top + titleH + gap)
+    drawWaitingStatus(cx, top + titleH + gap, base)
   else
-    drawCenteredLines(ctx, { status })
+    drawCenteredLines(ctx, { base .. "..." })
   end
 end
 
@@ -1541,18 +1526,15 @@ local function drawSelectionPopup(ctx)
     return
   end
 
-  -- Pre-build the row texts and pick ONE font small enough for the widest of them
-  -- (incl. the "> " cursor prefix) so long names plus the "(Nc)" cycle count fit the
-  -- width instead of being clipped. Only the list rows scale — the title and legend
-  -- keep their fixed size. The row height only tightens when the small font is
-  -- actually used, so roomy popups look exactly as before.
+  -- Pre-build the row texts. The list rows use the small font by default so more
+  -- entries fit and long names plus the "(Nc)" cycle count don't get clipped; the
+  -- title and legend keep their fixed size.
   local availW  = w - 2 * pad
   local rows    = {}
-  local rowFlag = 0
+  local rowFlag = SMLSIZE
   for i, item in ipairs(list) do
     local label = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
     rows[i] = label .. " (" .. cyclesFor(ctx, item.packId) .. "c)"
-    if fitWidth("> " .. rows[i], 0, availW) == SMLSIZE then rowFlag = SMLSIZE end
   end
   local _, rowTextH = lcd.sizeText("0", rowFlag)
   local rowH = (rowFlag == SMLSIZE) and (rowTextH + sx(3)) or TH
