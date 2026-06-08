@@ -319,6 +319,10 @@ local function readTelemetry(ctx)
   ctx.linkQuality = l
   ctx.rawVoltage  = v
 
+  -- FC on USB (no battery): link live but voltage, current and capacity all zero.
+  -- All three never glitch to zero at once, so no debounce is needed.
+  ctx.noBatterySignal = l > 0 and v == 0 and i == 0 and q == 0
+
   -- Voltage: [0.5 V × cells … 5 V × cells]
   local cells = ctx.cells
   if cells and v >= 0.5 * cells and v <= 5 * cells then
@@ -412,9 +416,20 @@ local function isOnline(ctx)
   return ctx.linkQuality > 0 or ctx.rawVoltage > 0
 end
 
--- Resets per-flight state on a (re-)connect. Telemetry values (voltage/current)
--- are kept and will be refreshed by readTelemetry on the next tick.
+-- Settle window elapsed, link live, but no battery ever reported → FC on USB.
+-- Self-correcting: once a real pack reports, restVoltage is set and this is false.
+local function isUsbConnected(ctx)
+  return ctx.state == STATE_CONNECTED
+         and ctx.restVoltage == nil
+         and ctx.noBatterySignal
+         and (getTime() - ctx.connectedSinceTime) >= SETTLE_DELAY
+end
+
+-- Resets per-flight state on a (re-)connect. voltage is cleared so a stale reading
+-- can't seed restVoltage (phantom battery on USB); current isn't — zero is valid
+-- and readTelemetry refreshes it every tick.
 local function resetFlightState(ctx)
+  ctx.voltage             = nil
   ctx.capacity            = nil
   ctx.warnPlayed          = false
   ctx.critPlayed          = false
@@ -1133,6 +1148,7 @@ end
 -- jitters as the dots appear.
 local WAIT_BASE     = "No Battery connected"
 local SETTLE_BASE   = "Calculating"
+local USB_BASE      = "USB connected"
 local DOT_INTERVAL  = 50   -- getTime units (1/100 s) per dot → ~2 s full cycle
 local function drawWaitingStatus(cx, y, base)
   local n      = math.floor(getTime() / DOT_INTERVAL) % 4   -- 0..3
@@ -1152,9 +1168,17 @@ local function drawWaitingTile(ctx)
   local pad    = sx(4)
   local title  = "LIPO-NANNY"
   local cx     = math.floor(w / 2)
-  -- Telemetry is up once we're in the post-connect settle window (CONNECTED, no
-  -- profile yet); only then does the status switch to "Calculate".
-  local base   = (ctx.state == STATE_CONNECTED) and SETTLE_BASE or WAIT_BASE
+  -- "USB connected" when the link is up but no battery; "Calculating" while
+  -- genuinely online and settling; else "No Battery connected". The isOnline guard
+  -- stops a dropped link from lingering on "Calculating" through the ENDED grace.
+  local base
+  if isUsbConnected(ctx) then
+    base = USB_BASE
+  elseif ctx.state == STATE_CONNECTED and isOnline(ctx) then
+    base = SETTLE_BASE
+  else
+    base = WAIT_BASE
+  end
 
   local titleFlag, _, titleH = pickFont(title, w - 2 * pad, math.floor(h * 0.28))
   local _, subH = lcd.sizeText(base, SMLSIZE)
@@ -1653,6 +1677,7 @@ local function create(zone, options)
     current     = nil,
     capacity    = nil,
     linkQuality = 0,
+    noBatterySignal = false,
 
     -- Sensor existence (assume present until checkSensors proves otherwise, so
     -- the first frame doesn't flash "Sensor missing").
