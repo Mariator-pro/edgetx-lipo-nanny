@@ -36,7 +36,7 @@ EdgeTX Lua script that tracks battery voltage and capacity, alerting the pilot b
 
 ## 🎯 What is it for?
 
-Lipo-Nanny lets RC pilots focus on flying. The EdgeTX script watches the flight battery over your model's telemetry (ELRS/CRSF out of the box, other systems via per-model sensor mapping) and speaks up on its own: twice per flight, when it's time to return and when it's time to land.
+Lipo Nanny lets RC pilots focus on flying. The EdgeTX script watches the flight battery over your model's telemetry (ELRS/CRSF out of the box, other systems via per-model sensor mapping) and speaks up on its own: twice per flight, when it's time to return and when it's time to land.
 
 It solves three concrete problems:
 - **Deep discharge** that permanently damages LiPo cells.
@@ -50,7 +50,7 @@ It solves three concrete problems:
 - **Telemetry-system agnostic:** the four sensors (voltage, current, consumed mAh, link) default to the CRSF/ELRS names but are remappable **per model** in the tool, so FrSky S.Port and other systems work too.
 - Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable.
 - Per physical **pack** (#1, #2, …) the script keeps a **cycle count**.
-- Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**, so there's no need to re-do your thresholds as a battery gets tired.
+- Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired.
 
 ---
 
@@ -76,12 +76,12 @@ It solves three concrete problems:
 
 3. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 
-4. **Create your configuration**: open **Tools → LIPONY** and set up:
+4. **Create your configuration**: open **Tools → Lipo Nanny** and set up:
    - at least one **battery profile** (manufacturer, chemistry, capacity, cell count, packs)
    - the **model settings** for the active model (cell count, single vs. parallel, assigned batteries)
    - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the four sensors at your system's telemetry names
 
-5. **Place the widget**: add the **LIPONY** widget to a telemetry screen. It only runs while it is placed on a page.
+5. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
 > Detailed configuration and in-flight usage: see [`docs/configuration.md`](docs/configuration.md) and [`docs/usage.md`](docs/usage.md).
 
@@ -93,11 +93,11 @@ If something's off, the widget tile usually tells you what:
 
 | Tile shows | Meaning / fix |
 |---|---|
-| `Waiting for telemetry…` | No link yet. Power the model and check the ELRS connection. |
-| `Sensor missing` | A required sensor (voltage or consumed-mAh, `RxBt`/`Capa` by default) isn't present. Run **Discover sensors** in EdgeTX telemetry, or remap the sensor names under **Tools → LIPONY → Models → Sensors**. |
-| `Setup required` | No configuration yet. Open **Tools → LIPONY** and create it. |
+| `No Battery connected…` | No link / no battery yet. Power the model and check the ELRS connection. (`Calculating…` once the link is up, `USB connected` when on USB power.) |
+| `Sensor missing` | A required sensor (voltage or consumed-mAh, `RxBt`/`Capa` by default) isn't present. Run **Discover sensors** in EdgeTX telemetry, or remap the sensor names under **Tools → Lipo Nanny → Models → Sensors**. |
+| `Setup required` | No configuration yet. Open **Tools → Lipo Nanny** and create it. |
 | `Config invalid` | `config.lua` is corrupt or has the wrong schema version. Recreate it in the tool, or fix/delete it on the PC. |
-| `Model not configured` | The active model has no entry. Add it in **Tools → LIPONY → Models**. |
+| `Model not configured` | The active model has no entry. Add it in **Tools → Lipo Nanny → Models**. |
 | `No batteries assigned` | Assign at least one matching battery profile to the model. |
 | `Cell count mismatch` | No assigned profile matches the model's cell count. |
 | `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. |
