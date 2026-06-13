@@ -183,10 +183,9 @@ local SENSOR_FIELDS = {
 local MFR_MAX  = 10
 local NAME_MAX = 30
 
--- Character groups for the ring picker. The active group is tracked in S.charGroup
--- (not derived from the character), so the rotary cycles within one group and wraps at
--- its ends, while the MDL key jumps to the next group's `first`. Each group ends in a
--- space, so spinning left off the first character lands straight on a blank.
+-- Character groups for the ring picker. The active group is tracked in S.charGroup, so
+-- the wheel cycles within one group and wraps at its ends; MDL jumps to the next group's
+-- `first`. Each group ends in a space, so spinning left off the first char lands on blank.
 local CHAR_GROUPS = {
   { label = "ABC",  chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ", first = "A" },
   { label = "abc",  chars = "abcdefghijklmnopqrstuvwxyz ", first = "a" },
@@ -217,7 +216,7 @@ local S = {
 }
 
 -- ---------------------------------------------------------------------------
--- Event helpers (color-radio virtual keys)
+-- Event helpers (virtual keys)
 -- ---------------------------------------------------------------------------
 
 local function isNext(e)
@@ -229,9 +228,9 @@ end
 local function isEnter(e) return e == EVT_VIRTUAL_ENTER end
 local function isExit(e)  return e == EVT_VIRTUAL_EXIT end
 
--- The MDL ("Menu") key switches the char-ring group; on color radios it maps to
--- EVT_VIRTUAL_MENU (shared by MDL/SYS/MENU). The `or -1` guards a firmware lacking the
--- constant, so a nil event never matches.
+-- The MDL key switches the char-ring group; it maps to EVT_VIRTUAL_MENU (shared by the
+-- MDL/SYS/MENU keys). The `or -1` guards a firmware lacking the constant, so a nil event
+-- never matches.
 local EVT_GROUP_SWITCH = EVT_VIRTUAL_MENU or -1
 local function isGroupSwitch(e)
   return e == EVT_GROUP_SWITCH
@@ -270,10 +269,9 @@ local function bodyY(row)
   return LINE + PAD * 2 + (row - 1) * LINE
 end
 
--- Selection is shown by inverting text (no focus bar). A navigation/action row
--- (list entry, button, sub-page opener) is a single string at COL1: `folder`
--- prefixes "> " and bolds it (everything that opens a sub-page), `disabled` dims
--- it, and the cursor row is drawn INVERS.
+-- Selection inverts the text (no focus bar). A navigation/action row is a single
+-- string at COL1: `folder` prefixes "> " and bolds it (opens a sub-page), `disabled`
+-- dims it, the cursor row is drawn INVERS.
 local function drawNavRow(row, text, selected, opts)
   opts = opts or {}
   local flags = opts.disabled and COLOR_THEME_DISABLED or COLOR_THEME_PRIMARY1
@@ -425,10 +423,9 @@ end
 -- Destructive resets (shared by Settings and the config-error recovery)
 -- ---------------------------------------------------------------------------
 
--- Zeroes every active pack's cycle count and empties the archive, then saves
--- (which bumps the generation so a running widget picks up the cleared counts on
--- its next poll). Profiles and models are kept. The RAM mutation is idempotent, so
--- a withRetry re-run after an SD write failure repeats it harmlessly.
+-- Zeroes every active pack's cycle count and empties the archive, then saves (the
+-- generation bump makes a running widget pick up the cleared counts). Profiles and
+-- models are kept. The RAM mutation is idempotent, so a withRetry retry is harmless.
 local function resetStats(onDone)
   for _, b in ipairs(S.cfg.batteries) do
     for _, inst in ipairs(b.instances or {}) do inst.cycles = 0 end
@@ -437,10 +434,9 @@ local function resetStats(onDone)
   withRetry(function() return saveConfig(S.cfg) end, onDone)
 end
 
--- Overwrites config.lua with factory defaults (all batteries, models, archive and
--- cycle counts erased) and clears any parse/schema error. With a single file the
--- pack-id counter can safely restart at 1 (defaultConfig) — nothing survives a
--- reset that a fresh id could collide with.
+-- Overwrites config.lua with factory defaults (batteries, models, archive and cycle
+-- counts all erased) and clears any parse/schema error. The pack-id counter safely
+-- restarts at 1 — nothing survives the reset that a fresh id could collide with.
 local function resetConfig(onDone)
   local fresh = defaultConfig()
   withRetry(function() return saveConfig(fresh) end, function()
@@ -666,8 +662,7 @@ end
 -- Batteries: shared helpers
 -- ---------------------------------------------------------------------------
 
--- Auto-generated profile name: "<Manufacturer> <S>s <Chemistry> <mAh>mAh"
--- e.g. "Tattu 6s LiPo 1300mAh".
+-- Auto-generated profile name: "<Manufacturer> <S>s <Chemistry> <mAh>mAh".
 local function genName(p)
   local mfr = (p.manufacturer ~= "" and (p.manufacturer .. " ")) or ""
   return mfr .. p.cells .. "s " .. p.chemistry .. " " .. p.capacityMah .. "mAh"
@@ -789,8 +784,7 @@ local function newProfile()
 end
 
 -- Deep-copies the instance objects { id, label, wear, cycles } so the editor can
--- mutate its working copy without touching the stored profile until save. cycles
--- now lives on the instance (single-file model), so it is copied along too.
+-- mutate its working copy without touching the stored profile until save.
 local function copyInstances(src)
   local out = {}
   for i, p in ipairs(src or {}) do
@@ -837,8 +831,6 @@ enterProfile = function(existing)
     S.profIsNew = true
   end
   -- Normalise both copies to label order (identical sort → no spurious "dirty").
-  -- cycles already travel with each instance (copyInstances), so the Packs page can
-  -- show and hand-edit them and the dirty check sees them via instancesEqual.
   sortByLabel(S.prof.instances)
   sortByLabel(S.profOrig.instances)
   S.profCursor   = 1
@@ -1229,8 +1221,7 @@ local function parallelModelsUsing(cfg, id)
 end
 
 -- Retires one instance into config.archive, keyed by its stable pack id, keeping
--- the battery's name and last cycle count as a human-readable reference. The cycle
--- count is read straight off the instance object (single-file model).
+-- the battery's name and last cycle count as a human-readable reference.
 local function archiveInstance(profileName, instance)
   if not instance or not instance.id then return end
   S.cfg.archive[instance.id] = { name = profileName, cycles = instance.cycles or 0 }
@@ -1596,7 +1587,7 @@ local function finishModelSave()
     batteryIds = S.model.batteryIds,
   }
   -- Only persist sensors that differ from the CRSF default; an all-default model
-  -- gets no sensors block, so it stays byte-identical to the pre-feature config.
+  -- gets no sensors block, keeping the config minimal.
   if sensorsAreCustom(S.model.sensors) then
     entry.sensors = {}
     for _, f in ipairs(SENSOR_FIELDS) do
