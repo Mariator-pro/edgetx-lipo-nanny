@@ -2038,7 +2038,7 @@ local function refresh(ctx, event, touchEvent)
 end
 
 return {
-  name       = "LIPONY",
+  name       = "Lipo Nanny",
   options    = {
     -- Theme dropdown (CHOICE labels are a nested table; the value is the 1-based
     -- index, so default 1 = "Dark"; needs EdgeTX 2.11+). Transparency = milky overlay
