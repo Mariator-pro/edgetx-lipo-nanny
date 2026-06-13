@@ -1277,6 +1277,11 @@ end
 -- line. Shown for every idle/waiting state (true WAITING, the post-connect settle
 -- window, the popup/flight-end timeouts). Degrades on short zones to a single
 -- centered status line.
+-- Title font sized to this fixed-width anchor instead of the shorter own title,
+-- so the splash matches a same-sized neighbouring splash. Widen/narrow the count
+-- to shrink/grow the title by a font step.
+local TITLE_SIZE_REF = string.rep("M", 8)
+
 local function drawWaitingTile(ctx)
   local w, h   = ctx.zone.w, ctx.zone.h
   local pad    = sx(4)
@@ -1294,19 +1299,24 @@ local function drawWaitingTile(ctx)
     base = WAIT_BASE
   end
 
-  local titleFlag, _, titleH = pickFont(title, w - 2 * pad, math.floor(h * 0.28))
+  -- Fit the anchor width, then render one font step smaller.
+  local titleFlag = smallerFont(pickFont(TITLE_SIZE_REF, w * 0.95, math.floor(h * 0.5)))
+  local _, titleH = lcd.sizeText(title, titleFlag)
   local _, subH = lcd.sizeText(base, SMLSIZE)
   local gap     = sx(4)
   local avail   = h - 2 * pad
 
-  if avail >= titleH + gap + subH then
-    local blockH = titleH + gap + subH
-    local top    = math.floor((h - blockH) / 2)
+  -- Status plus a reserved empty third line (sx(2) below it) for a 3-line layout.
+  local lineGap = sx(2)
+  local statusH = subH + lineGap + subH
+  -- Drop order when the zone shrinks: title first, then the empty line.
+  if avail >= titleH + gap + statusH then
+    local top = math.floor((h - (titleH + gap + statusH)) / 2)
     dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
     drawWaitingStatus(cx, top + titleH + gap, base)
+  elseif avail >= statusH then
+    drawWaitingStatus(cx, math.floor((h - statusH) / 2), base)
   else
-    -- Too short for the title: just the status line, still SMLSIZE (not the larger
-    -- default font drawCenteredLines would use), vertically centred.
     drawWaitingStatus(cx, math.floor((h - subH) / 2), base)
   end
 end
