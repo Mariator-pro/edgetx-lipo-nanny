@@ -1663,36 +1663,31 @@ end
 
 -- Renders the selection popup inside the widget zone (the traditional widget API
 -- cannot draw outside its zone; on a full-screen widget this fills the screen).
--- Title + a scrolling window of "name #N" rows with a "> " cursor marker.
 local function drawSelectionPopup(ctx)
   local w, h  = ctx.zone.w, ctx.zone.h
   local pad   = sx(2)
-  -- Drawn on the background refresh() already set up, using the active palette
-  -- (fg rows, accent cursor) so it tracks the Dark/Light theme.
+  -- No own background: refresh() already painted it; palette colours track the theme.
 
-  local title = ctx.parallel and "SELECT BATTERIES" or "SELECT BATTERY"
+  local title
+  if ctx.parallel then
+    title = "SELECT PACK SLOT " .. (ctx.popupSlot or 1)
+  else
+    title = "SELECT PACK"
+  end
   dtext(math.floor(w / 2), pad, title, COLORS.accent, CENTER + BOLD)
 
   local firstRow = pad + TH
   local _, smlH  = lcd.sizeText("0", SMLSIZE)
   local legendY  = h - pad - smlH          -- bottom line reserved for the SMLSIZE legend
 
-  -- Parallel: once slot 1 is locked in, show it above the slot-2 list.
-  if ctx.parallel and ctx.popupSlot == 2 and ctx.slot1Item then
-    local s1 = ctx.slot1Item
-    dtext(pad, firstRow, "Slot1: " .. formatBatteryLabel(s1.profile.name, { { pos = s1.pos } }), COLORS.muted, 0)
-    firstRow = firstRow + TH
-  end
-
   local list = activeSelectionList(ctx)
   if #list == 0 then
-    dtext(pad, firstRow, "No profiles", COLORS.fg, 0)
+    dtext(pad, firstRow, "No profiles", COLORS.fg, SMLSIZE)
     return
   end
 
-  -- Pre-build the row texts. The list rows use the small font by default so more
-  -- entries fit and long names plus the "(Nc)" cycle count don't get clipped; the
-  -- title and legend keep their fixed size.
+  -- Row texts in the small font so more entries fit and long names plus the
+  -- "(Nc)" cycle count aren't clipped.
   local availW  = w - 2 * pad
   local rows    = {}
   local rowFlag = SMLSIZE
@@ -1719,9 +1714,8 @@ local function drawSelectionPopup(ctx)
   if start < 1 then start = 1 end
   local last = math.min(#list, start + maxRows - 1)
 
-  -- Confirm-hold progress (0..1): how far through the aileron-held commit we are.
-  -- ctx.confirmSince is set in pollSelectionSticks while the stick is held and cleared
-  -- on release/commit, so this reads non-zero only during an active hold.
+  -- Confirm-hold progress (0..1): non-zero only during an active hold
+  -- (pollSelectionSticks sets/clears ctx.confirmSince on hold/release).
   local confirmProgress = 0
   if ctx.confirmSince then
     confirmProgress = (getTime() - ctx.confirmSince) / CONFIRM_HOLD

@@ -33,9 +33,9 @@ The widget moves through three states:
 ## Choosing the battery (selection popup)
 
 When the pack can't be auto-selected (several assigned profiles fit the voltage,
-none clearly fit, or it's a parallel model) a `SELECT BATTERY` /
-`SELECT BATTERIES` popup appears **right in the widget tile**. You drive it with
-the **sticks**, no fullscreen or menu needed:
+none clearly fit, or it's a parallel model) a `SELECT PACK` popup appears **right
+in the widget tile**. You drive it with the **sticks**, no fullscreen or menu
+needed:
 
 - **Elevator up / down** moves the cursor through the list (each row shows the
   pack label and its cycle count, e.g. `6S 1300 #1 (12c)`).
@@ -43,8 +43,9 @@ the **sticks**, no fullscreen or menu needed:
   fill bar grows across the row while you hold; the pick commits when it's full.
 
 The on-screen legend reads `ele: up/dn  ail: hold >`. **Parallel** models ask for
-two slots in turn (slot 1, then slot 2 from the same profile's remaining packs);
-a slot with only one candidate is taken automatically.
+two slots in turn — the title reads `SELECT PACK SLOT 1`, then `SELECT PACK
+SLOT 2` (slot 2 lists the same profile's remaining packs); a slot with only one
+candidate is taken automatically.
 
 ---
 
