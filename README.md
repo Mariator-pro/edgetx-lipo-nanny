@@ -83,6 +83,12 @@ It solves three concrete problems:
 
 5. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
+   > 📐 **Recommended screen layouts:** EdgeTX names its widget-screen layouts `columns × rows` (e.g. `2×4` = 2 columns next to each other, 4 rows on top of each other → 8 zones). The Lipo Nanny widget is designed for a **half-width** zone, so it looks best in the layouts with **2 columns**:
+   >
+   > - **2×2** — half width, half height (the quarter-tile). This is the primary use case and shows the full layout with every value.
+   > - **2×3** — half width, one third height. Slightly shorter, so the widget automatically switches to a more compact layout.
+   > - **2×4** — half width, one quarter height. The shortest supported zone; it falls back to the most compact layout to stay readable.
+
 > Detailed configuration and in-flight usage: see [`docs/configuration.md`](docs/configuration.md) and [`docs/usage.md`](docs/usage.md).
 
 ---
