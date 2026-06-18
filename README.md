@@ -83,6 +83,11 @@ It solves three concrete problems:
 
 5. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
+6. *(Optional)* Open the widget settings to adjust:
+   - **Theme** — `Dark` / `Light`.
+   - **Transparency** — milky-overlay transparency level (light theme only).
+   - **TxtColor** — color of the heading / brand text: `Default` (the classic green), `Theme` (the focus color of your active EdgeTX theme), or `Custom` (pick any color via **CustomCol**).
+
    > 📐 **Recommended screen layouts:** EdgeTX names its widget-screen layouts `columns × rows` (e.g. `2×4` = 2 columns next to each other, 4 rows on top of each other → 8 zones). The Lipo Nanny widget is designed for a **half-width** zone, so it looks best in the layouts with **2 columns**:
    >
    > - **2×2** — half width, half height (the quarter-tile). This is the primary use case and shows the full layout with every value.
