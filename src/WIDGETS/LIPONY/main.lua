@@ -41,6 +41,10 @@ local STICK_DEADZONE    = 200  -- back inside this re-arms the next step (edge d
 local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
 local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit;
                                -- long enough for the fill-bar confirm animation to read
+-- Opacity (0 invisible … 15 opaque) of the confirm-hold fill: drawn in the brand
+-- colour but semi-transparent, so the solid-brand cursor text stays readable on top
+-- whatever brand colour the pilot picked (no separate dim shade to maintain).
+local CONFIRM_FILL_OPACITY = 8
 
 -- Display scaling: pixel constants are relative to a 480 px reference width,
 -- matching EdgeTX's own LVGL 480-baseline. Wider screens scale up by S = LCD_W/480
@@ -65,12 +69,13 @@ local METRIC_GAP = sx(1)
 
 -- Two palettes, picked per frame by the "Theme" option (see refresh()). DARK paints
 -- its own near-black panel; LIGHT stays transparent (radio theme shows through) with
--- black text. `accent` is the "good" green (label/brand/%/bar/glyph/voltage); the
--- yellow/red escalation colours are identical in both themes.
+-- black text. `accent` is the OK/"good"-state green (%/bar/glyph/voltage); the
+-- yellow/red escalation colours are identical in both themes. The brand/heading
+-- colour is a SEPARATE variable (BRAND, below) so the TxtColor option can recolour
+-- the marque without ever touching these state colours.
 local DARK = {
   panel   = lcd.RGB( 18,  20,  18),   -- near-black background
-  accent  = lcd.RGB(124, 210,  48),   -- lime green (label, brand, % / V / glyph "ok")
-  accentDim = lcd.RGB( 45,  80,  18), -- muted green: confirm-hold fill behind accent text
+  accent  = lcd.RGB(124, 210,  48),   -- lime green (% / V / bar / glyph "ok" state)
   fg      = lcd.RGB(235, 235, 235),   -- primary readouts
   muted   = lcd.RGB(150, 150, 150),   -- captions / secondary lines
   track   = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
@@ -79,7 +84,6 @@ local DARK = {
 local LIGHT = {
   panel   = nil,                      -- transparent: no panel painted
   accent  = lcd.RGB(  1, 152,   8),   -- darker green — readable on a bright background
-  accentDim = lcd.RGB(190, 235, 175), -- pale green: confirm-hold fill behind accent text
   fg      = lcd.RGB(  0,   0,   0),   -- black readouts
   muted   = lcd.RGB( 90,  90,  90),   -- darker grey for light backgrounds
   track   = lcd.RGB(200, 200, 205),   -- light-grey empty track
@@ -87,6 +91,26 @@ local LIGHT = {
 }
 -- Active palette; reassigned each frame in refresh() from ctx.cfg.Theme.
 local COLORS = DARK
+
+-- Brand/heading colour, resolved once per frame in refresh() from the TxtColor
+-- option. Kept apart from COLORS.accent on purpose: sharing one variable would let
+-- the option bleed into the bar/%/voltage state colours. Default is the active
+-- palette's accent green, so each theme keeps its own green when set to "Default".
+local BRAND = DARK.accent
+
+-- Resolves the brand colour from the TxtColor CHOICE (opt) and the CustomCol picker.
+-- COLOR_THEME_FOCUS and the picker value can be theme indices, not raw RGB, so
+-- lcd.getColor() normalises both into a real RGB usable by setColor/drawText. Read
+-- defensively (opt 2/3, else Default) so an uninitialised -1 still renders as Default.
+local function brandColor(opt, customCol)
+  if opt == 2 and lcd.getColor then                -- Theme focus colour
+    local c = lcd.getColor(COLOR_THEME_FOCUS); if c then return c end
+  elseif opt == 3 and customCol then               -- Custom picker value
+    local c = lcd.getColor and lcd.getColor(customCol) or customCol
+    if c then return c end
+  end
+  return COLORS.accent                             -- Default: per-palette accent green
+end
 
 -- Mascot-eye colours (theme-independent).
 local EYE_WHITE = lcd.RGB(245, 245, 245)
@@ -828,8 +852,8 @@ end
 local function drawHeaderLabel(x, y, label)
   local _, th = lcd.sizeText(label, SMLSIZE)   -- text height, to centre the dot
   local dot   = sx(5)
-  lcd.drawFilledRectangle(x, y + math.floor((th - dot) / 2), dot, dot, COLORS.accent)
-  dtext(x + dot + sx(3), y, label, COLORS.accent, SMLSIZE)
+  lcd.drawFilledRectangle(x, y + math.floor((th - dot) / 2), dot, dot, BRAND)
+  dtext(x + dot + sx(3), y, label, BRAND, SMLSIZE)
 end
 
 -- Vertical battery glyph: a cap, an outlined body and `nSeg` segments filled from
@@ -1312,7 +1336,7 @@ local function drawWaitingTile(ctx)
   -- Drop order when the zone shrinks: title first, then the empty line.
   if avail >= titleH + gap + statusH then
     local top = math.floor((h - (titleH + gap + statusH)) / 2)
-    dtext(cx, top, title, COLORS.accent, titleFlag + CENTER)
+    dtext(cx, top, title, BRAND, titleFlag + CENTER)
     drawWaitingStatus(cx, top + titleH + gap, base)
   elseif avail >= statusH then
     drawWaitingStatus(cx, math.floor((h - statusH) / 2), base)
@@ -1376,7 +1400,7 @@ local function drawEndedTile(ctx)
     { ord = 3, draw = function(y) dtext(pad, y, usedText, COLORS.fg, SMLSIZE) end },
     { ord = 5, draw = function(y) dtext(pad, y, "Total pack cycles (" .. cyclesStr .. ")", COLORS.muted, SMLSIZE) end },
     { ord = 4, draw = function(y) dtext(pad, y, lastText, COLORS.muted, SMLSIZE) end },
-    { ord = 2, draw = function(y) dtext(pad, y, "Flight ended", COLORS.accent, SMLSIZE) end },
+    { ord = 2, draw = function(y) dtext(pad, y, "Flight ended", BRAND, SMLSIZE) end },
   }
   local rows = {}
   for i = 1, nRows do rows[i] = cand[i] end
@@ -1674,7 +1698,7 @@ local function drawSelectionPopup(ctx)
   else
     title = "SELECT PACK"
   end
-  dtext(math.floor(w / 2), pad, title, COLORS.accent, CENTER + BOLD)
+  dtext(math.floor(w / 2), pad, title, BRAND, CENTER + BOLD)
 
   local firstRow = pad + TH
   local _, smlH  = lcd.sizeText("0", SMLSIZE)
@@ -1724,14 +1748,15 @@ local function drawSelectionPopup(ctx)
 
   local y = firstRow
   for i = start, last do
-    -- Hold-to-confirm fill: a muted-green bar grows left→right behind the cursor row
-    -- as the aileron is held, completing when the commit fires. Text drawn over it.
+    -- Hold-to-confirm fill: a translucent brand-coloured bar grows left→right behind
+    -- the cursor row as the aileron is held, completing when the commit fires. Drawn
+    -- in BRAND so it matches the recoloured cursor text; the solid text over it stays
+    -- readable thanks to the reduced opacity.
     if i == cursor and confirmProgress > 0 then
-      lcd.setColor(CUSTOM_COLOR, COLORS.accentDim)
-      lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), CUSTOM_COLOR)
+      lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), BRAND, CONFIRM_FILL_OPACITY)
     end
     local prefix = (i == cursor) and "> " or "  "
-    dtext(pad, y, prefix .. rows[i], (i == cursor) and COLORS.accent or COLORS.fg, rowFlag)
+    dtext(pad, y, prefix .. rows[i], (i == cursor) and BRAND or COLORS.fg, rowFlag)
     y = y + rowH
   end
 
@@ -1768,7 +1793,7 @@ end
 -- the googly-eyes mascot beside it.
 local function drawBrandHeading(ctx)
   local pad = sx(4)
-  dtext(pad, pad, "LIPO-NANNY", COLORS.accent, SMLSIZE)
+  dtext(pad, pad, "LIPO-NANNY", BRAND, SMLSIZE)
   local hw, hh = lcd.sizeText("LIPO-NANNY", SMLSIZE)
   drawMascotEyes(pad + hw + sx(6), pad, sx(20), math.max(hh, sx(14)))
 end
@@ -1825,7 +1850,8 @@ local function create(zone, options)
     zone = zone,
 
     -- Widget options (see table at end of file): cfg.Theme = 1 dark / 2 light,
-    -- cfg.Transparency = milky-overlay strength 0–5.
+    -- cfg.Transparency = milky-overlay strength 0–5, cfg.TxtColor = brand colour
+    -- mode (1 Default / 2 Theme / 3 Custom), cfg.CustomCol = picker value for Custom.
     cfg = options,
 
     -- State machine
@@ -2025,6 +2051,10 @@ local function refresh(ctx, event, touchEvent)
   -- module-global palette is safe. Anything but 2 (incl. unset) falls back to Dark.
   COLORS = (ctx.cfg and ctx.cfg.Theme == 2) and LIGHT or DARK
 
+  -- Brand/heading colour for this frame (after the palette so the "Default" fallback
+  -- picks up the active palette's accent). State colours stay on COLORS.accent.
+  BRAND = brandColor(ctx.cfg and ctx.cfg.TxtColor, ctx.cfg and ctx.cfg.CustomCol)
+
   -- DARK paints its own panel so the tile looks the same on any radio theme; LIGHT
   -- leaves the background transparent so the radio theme shows through.
   if not COLORS.transparent then
@@ -2049,6 +2079,11 @@ return {
     -- 0–5 (default 2), applied in the Light theme only (Dark stays solid black).
     { "Theme", CHOICE, 1, { "Dark", "Light" } },
     { "Transparency", VALUE, 2, 0, 5 },
+    -- Brand/heading colour. TxtColor: 1 Default (per-palette green), 2 Theme
+    -- (COLOR_THEME_FOCUS), 3 Custom (CustomCol). CustomCol shows the native colour
+    -- picker; only used when TxtColor = Custom, default = the original Dark lime.
+    { "TxtColor", CHOICE, 1, { "Default", "Theme", "Custom" } },
+    { "CustomCol", COLOR, lcd.RGB(124, 210, 48) },
   },
   create     = create,
   update     = update,
