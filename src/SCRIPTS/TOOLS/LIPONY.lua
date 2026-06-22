@@ -157,12 +157,14 @@ local SOUND_DEFAULT_FILES = { ["warn.wav"] = true, ["crit.wav"] = true }
 -- Sorted *.wav files in the sound folder (any user-named file shows up). pcall:
 -- dir() raises when the folder is missing. string.lower/match as free functions:
 -- EdgeTX-Lua has no string methods (fname:lower() would raise on the radio).
+-- Names starting with "." are skipped: macOS writes "._name.wav" AppleDouble
+-- metadata companions onto FAT/exFAT cards — those are not playable audio.
 local function listSoundFiles()
   local files = {}
   pcall(function()
     for fname in dir(PATHS.soundList) do
       if type(fname) == "string" and string.match(string.lower(fname), "%.wav$")
-         and not SOUND_DEFAULT_FILES[fname] then
+         and string.sub(fname, 1, 1) ~= "." and not SOUND_DEFAULT_FILES[fname] then
         files[#files + 1] = fname
       end
     end
@@ -352,6 +354,15 @@ local function drawDownArrow(x, y, color)
   end
 end
 
+-- Same triangle rotated 90° to point right, marking a row that opens/dives into a
+-- sub-context (the Low/Critical warning rows). (x, y) is the top-left; the base is
+-- ARROW_W tall and it tapers to a point ARROW_H to the right.
+local function drawRightArrow(x, y, color)
+  for i = 0, ARROW_H - 1 do
+    lcd.drawFilledRectangle(x + i, y + i, 1, ARROW_W - 2 * i, color)
+  end
+end
+
 -- Draws the popup arrow at (x, y), vertically centred on the row; returns the x
 -- where the value text should start (right of the arrow).
 local function drawArrowBefore(x, y, color)
@@ -463,25 +474,51 @@ local function openAlert(text)
   S.dialog = { text = text, alert = true }
 end
 
+-- Word-wraps `text` to lines no wider than maxW px, breaking on spaces (a single
+-- word wider than maxW keeps its own line rather than splitting mid-word).
+local function wrapText(text, maxW)
+  local lines, line = {}, ""
+  local i, n = 1, #text
+  while i <= n do
+    local sp = string.find(text, " ", i, true)
+    local word
+    if sp then word = string.sub(text, i, sp - 1); i = sp + 1
+    else       word = string.sub(text, i);         i = n + 1 end
+    local cand = (line == "") and word or (line .. " " .. word)
+    if line ~= "" and lcd.sizeText(cand) > maxW then
+      lines[#lines + 1] = line
+      line = word
+    else
+      line = cand
+    end
+  end
+  lines[#lines + 1] = line
+  return lines
+end
+
 local function drawDialog()
   local d = S.dialog
   dimScreen()
-  local w = math.floor(LCD_W * 0.8)
-  local h = 3 * LINE + PAD * 2
-  local x = math.floor((LCD_W - w) / 2)
-  local y = math.floor((LCD_H - h) / 2)
-  lcd.drawFilledRectangle(x, y, w, h, COLOR_THEME_SECONDARY1)
-  lcd.drawRectangle(x, y, w, h, COLOR_THEME_PRIMARY2)
-  lcd.drawText(x + PAD, y + PAD, d.text, COLOR_THEME_PRIMARY2)
-  local by = y + h - LINE - PAD
-  local function btn(bx, label, sel)
-    lcd.drawText(bx, by, label, COLOR_THEME_PRIMARY2 + (sel and INVERS or 0))
+  local w     = math.floor(LCD_W * 0.8)
+  local x     = math.floor((LCD_W - w) / 2)
+  local lines = wrapText(d.text, w - 2 * PAD)
+  local h     = (#lines + 2) * LINE + PAD * 2   -- text lines + gap + button row
+  local y     = math.floor((LCD_H - h) / 2)
+  -- Drop shadow, light body, thin frame (matches the picker popup).
+  lcd.drawFilledRectangle(x + 3, y + 3, w, h, COLOR_THEME_PRIMARY1)
+  lcd.drawFilledRectangle(x, y, w, h, COLOR_THEME_SECONDARY3)
+  lcd.drawRectangle(x, y, w, h, COLOR_THEME_SECONDARY1)
+  for i, line in ipairs(lines) do
+    lcd.drawText(x + PAD, y + PAD + (i - 1) * LINE, line, COLOR_THEME_PRIMARY1)
   end
+  -- Buttons styled like the bottom bar (Back/Save): outlined, focus-filled when selected.
+  local btnY = y + h - LINE - PAD
   if d.alert then
-    btn(math.floor(LCD_W / 2) - PAD * 2, "[ OK ]", true)
+    local okW = lcd.sizeText("OK") + 2 * BTN_PADX
+    drawButton(math.floor((LCD_W - okW) / 2), btnY, "OK", true)
   else
-    btn(x + PAD * 2,                 d.yes, d.cursor == 1)
-    btn(x + math.floor(w / 2) + PAD, d.no,  d.cursor == 2)
+    drawButton(x + PAD * 2,                 btnY, d.yes, d.cursor == 1)
+    drawButton(x + math.floor(w / 2) + PAD, btnY, d.no,  d.cursor == 2)
   end
 end
 
@@ -856,7 +893,11 @@ local function drawDefaults()
     local rowSel = (S.cursor == r) and not dived
     -- The row label inverts to mark the focused row before diving in; once dived,
     -- only the active cell inverts (and blinks while being edited).
-    lcd.drawText(ST_WARN, y, row.label, COLOR_THEME_PRIMARY1 + (rowSel and INVERS or 0))
+    -- Right arrow before the label: the row opens (dive in) to edit its cells.
+    local _, lh = lcd.sizeText("Mg")
+    drawRightArrow(ST_WARN, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
+    lcd.drawText(ST_WARN + ARROW_W + ARROW_GAP, y, row.label,
+                 COLOR_THEME_PRIMARY1 + (rowSel and INVERS or 0))
     local function cell(x, text, sub, editing)
       local f = COLOR_THEME_PRIMARY1
       if editing then f = f + BLINK + INVERS
@@ -2130,10 +2171,10 @@ local function drawSensors()
     local desc = SENSOR_FIELDS[math.min(S.sensorCursor, #SENSOR_FIELDS)].desc
     local dy   = footTop - #desc * smPitch - 4
     for j, line in ipairs(desc) do
-      lcd.drawText(COL1, dy + (j - 1) * smPitch, line, COLOR_THEME_DISABLED + SMLSIZE)
+      lcd.drawText(COL1, dy + (j - 1) * smPitch, line, COLOR_THEME_PRIMARY1 + SMLSIZE)
     end
   else
-    lcd.drawText(COL1, footTop - smPitch - 4, "Activate this model to edit sensors.", COLOR_THEME_DISABLED + SMLSIZE)
+    lcd.drawText(COL1, footTop - smPitch - 4, "Activate this model to edit sensors.", COLOR_THEME_PRIMARY1 + SMLSIZE)
   end
 
   local actions = sensorsResetShown() and { "Back", "Reset to CRSF defaults" } or { "Back" }
@@ -2233,7 +2274,10 @@ local function drawPacks()
     local cycActive  = dived and S.packSub == "cycles"
     local wearActive = dived and S.packSub == "wear"
     local actActive  = dived and S.packSub == "archive"
-    cell(PK_ID,   "#" .. p.label, rowSel, false)
+    -- Right arrow before the ID: the row opens (dive in) to edit its cells.
+    local _, lh = lcd.sizeText("Mg")
+    drawRightArrow(PK_ID, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
+    cell(PK_ID + ARROW_W + ARROW_GAP, "#" .. p.label, rowSel, false)
     cell(PK_CYC,  cyc,            cycActive, cycActive and S.packEditCyc)
     cell(PK_WEAR, p.wear .. " %", wearActive, wearActive and S.packEditWear)
     drawButton(PK_ACT, y - 2, "Remove", actActive)   -- Back/Save-style button
