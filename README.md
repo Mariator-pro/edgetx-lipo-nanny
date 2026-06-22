@@ -65,26 +65,37 @@ It solves three concrete problems:
 
 ## 📥 Installation
 
-1. **Copy the script files** onto the radio's SD card:
-   - `/WIDGETS/LIPONY/main.lua`: the telemetry widget (runtime logic + warnings)
-   - `/SCRIPTS/TOOLS/LIPONY.lua`: the configuration tool
-   - `/SCRIPTS/LIPONY/`: an (initially empty) data folder the tool writes `config.lua` into.
+1. **Copy the files onto the radio's SD card.** Copy everything below to the same locations (the data folder is created automatically on first save if it's missing):
 
-2. **Add the voice files** so the warnings are actually spoken. Supply your own WAV files at:
-   - `/SOUNDS/en/scripts/LIPONY/warn.wav`: early warning (e.g. *"return to home"*)
-   - `/SOUNDS/en/scripts/LIPONY/crit.wav`: critical warning (e.g. *"land now"*)
-   > You can also drop additional named `*.wav` files into that folder and pick them per warning under **Tools → Lipo Nanny → Settings**; `warn.wav` / `crit.wav` are the defaults.
+   ```
+   WIDGETS/
+   └── LIPONY/
+       └── main.lua             ← telemetry widget (runtime logic + warnings)
+   SCRIPTS/
+   ├── TOOLS/
+   │   └── LIPONY.lua           ← configuration tool
+   └── LIPONY/
+       └── config.lua           ← written by the tool (created on first save)
+   SOUNDS/
+   └── en/
+       └── scripts/
+           └── LIPONY/
+               ├── warn.wav     ← early warning    (e.g. "return to home")
+               └── crit.wav     ← critical warning (e.g. "land now")
+   ```
 
-3. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
+   The WAV files are yours to supply — `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings**. The WAVs always live under `/SOUNDS/en/scripts/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
 
-4. **Create your configuration**: open **Tools → Lipo Nanny** and set up:
+2. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
+
+3. **Create your configuration**: open **Tools → Lipo Nanny** and set up:
    - at least one **battery profile** (manufacturer, chemistry, capacity, cell count, packs)
    - the **model settings** for the active model (cell count, single vs. parallel, assigned batteries)
    - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the four sensors at your system's telemetry names
 
-5. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
+4. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
-6. *(Optional)* Open the widget settings to adjust:
+5. *(Optional)* Open the widget settings to adjust:
    - **Theme** — `Dark` / `Light`.
    - **Transparency** — milky-overlay transparency level (light theme only).
    - **TxtColor** — color of the heading / brand text: `Default` (the classic green), `Theme` (the focus color of your active EdgeTX theme), or `Custom` (pick any color via **CustomCol**).

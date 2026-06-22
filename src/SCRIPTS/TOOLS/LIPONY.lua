@@ -22,7 +22,7 @@
 -- 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 -- =====================================================================
 
-local VERSION        = "1.0.1"
+local VERSION        = "1.1.0"
 local SCHEMA_VERSION = 1
 local PATHS = {
   config    = "/SCRIPTS/LIPONY/config.lua",
@@ -1248,8 +1248,8 @@ end
 
 -- Draws the live edit value in the field row. The character/slot at the cursor is marked
 -- black (white glyph) -- in char mode that's the char being edited, in position mode the
--- bracketed slot. Position mode also draws a Done button fixed at the right of the row
--- (styled like Back/Save). The text occupies the space left of it and, when it would not
+-- bracketed slot. Position mode also draws Done and Clear buttons fixed at the right of
+-- the row (styled like Back/Save). The text occupies the space left of them and, when it would not
 -- fit (long names), shows a window around the active slot with "..." clip markers.
 local INV_FLAGS = COLOR_THEME_PRIMARY1 + INVERS
 local function drawEditValue(y)
@@ -1314,7 +1314,7 @@ local function drawEditValue(y)
 end
 
 -- Full-screen editor for Name (item 1) / Manufacturer (item 2): the edited text sits
--- at the top with the Done target, the char ring fills the rest while a slot is open.
+-- at the top with the Done/Clear buttons, the char ring fills the rest while a slot is open.
 local function drawTextEditor()
   drawHeader(S.profEditing == 2 and "EDIT MANUFACTURER" or "EDIT NAME")
   local y = bodyY(1)
@@ -1441,7 +1441,7 @@ local function handleTextEdit(e)
       S.textPos = math.min(S.textPos, textDoneIndex())
     end
   else
-    -- Position mode: the wheel walks the slots, ENTER drills in (or commits on Done).
+    -- Position mode: the wheel walks the slots, ENTER drills in (commit on Done, empty on Clear).
     if isNext(e) then
       S.textPos = math.min(S.textPos + 1, textClearIndex())
     elseif isPrev(e) then
