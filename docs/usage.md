@@ -72,12 +72,15 @@ candidate is taken automatically.
 Two one-shot voice files fire as the remaining percentage drops past the
 thresholds:
 
-| Trigger | Default | Sound file |
+| Trigger | Default | Default sound file |
 |---|---|---|
 | **Low / warn** | 30 % | `/SOUNDS/en/scripts/LIPONY/warn.wav` |
 | **Critical** | 20 % | `/SOUNDS/en/scripts/LIPONY/crit.wav` |
 
 - Each fires **once** per flight (it won't nag repeatedly).
+- Which file plays is selectable **per warning** under **Settings → Sound** —
+  `warn.wav` / `crit.wav` are just the defaults. Drop any named `*.wav` into
+  `/SOUNDS/en/scripts/LIPONY/` and pick it there.
 - If you plug in a pack that is **already below the warn threshold**, the low
   announcement is suppressed (you knowingly started part used); the critical
   announcement stays armed.

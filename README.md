@@ -73,6 +73,7 @@ It solves three concrete problems:
 2. **Add the voice files** so the warnings are actually spoken. Supply your own WAV files at:
    - `/SOUNDS/en/scripts/LIPONY/warn.wav`: early warning (e.g. *"return to home"*)
    - `/SOUNDS/en/scripts/LIPONY/crit.wav`: critical warning (e.g. *"land now"*)
+   > You can also drop additional named `*.wav` files into that folder and pick them per warning under **Tools → Lipo Nanny → Settings**; `warn.wav` / `crit.wav` are the defaults.
 
 3. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 

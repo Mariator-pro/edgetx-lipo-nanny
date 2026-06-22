@@ -278,6 +278,7 @@ local function loadConfig()
     return nil, "schema"
   end
   result.archive = result.archive or {}
+  result.sounds  = result.sounds or {}
 
   return result, nil
 end
@@ -290,7 +291,8 @@ local DEFAULT_SENSOR_CURRENT  = "Curr"
 local DEFAULT_SENSOR_CAPACITY = "Capa"
 local DEFAULT_SENSOR_LINK     = "RQly"
 
--- Pilot-provided voice files. Missing files just stay silent (playFile no-ops).
+-- Default voice files; config.sounds.warn/.crit may override them. Missing files
+-- stay silent (playFile no-ops).
 local WARN_SOUND = "/SOUNDS/en/scripts/LIPONY/warn.wav"
 local CRIT_SOUND = "/SOUNDS/en/scripts/LIPONY/crit.wav"
 
@@ -1535,14 +1537,15 @@ local function evaluateWarnings(ctx)
   local restPct = calculateRestPct(ctx)
   if not restPct then return end
 
+  local sounds = (ctx.config and ctx.config.sounds) or {}
   local warn, crit = getThresholds(ctx)
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
-    playFile(WARN_SOUND)
+    playFile(sounds.warn or WARN_SOUND)
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
-    playFile(CRIT_SOUND)
+    playFile(sounds.crit or CRIT_SOUND)
   end
 end
 

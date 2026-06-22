@@ -18,7 +18,7 @@ The main menu has four entries (plus **Exit**):
 |---|---|
 | **Batteries** | Your library of battery *profiles* (a model of battery) and their physical *packs*. |
 | **Models** | Per-model setup: cell count, single vs. parallel, which batteries are assigned, sensor mapping. |
-| **Settings** | Global warn / critical thresholds, sound test, and the destructive resets. |
+| **Settings** | Global warn / critical thresholds, per-warning sound selection + test, and the destructive resets. |
 | **About** | Version, schema version, and the file paths. |
 
 Navigation: the rotary wheel moves the cursor, **Enter** opens a folder (`>`) or
@@ -36,7 +36,7 @@ physical **packs** that you actually fly and that accumulate cycles.
 | Field | Notes |
 |---|---|
 | **Name** | Auto-generated as `<Manufacturer> <S>s <Chemistry> <mAh>mAh` (tagged `(auto)`). Editing it switches to a manual override; the **Reset name** button (see below) reverts it to auto. |
-| **Manufacturer** | Free text, max **10 chars** (used in the auto name). |
+| **Manufacturer** | Free text, max **10 chars** (used in the auto name). **Required** — a profile won't save while it is empty. |
 | **Chemistry** | `LiPo`, `LiPoHV`, or `LiIon`. Drives the resting-voltage → state-of-charge curve. |
 | **Capacity** | Nominal pack capacity in mAh (**10–50000**). The **MDL** key cycles the step size 10 → 100 → 1000. |
 | **Cells** | Cell count (S), **1–30**. Must match the model's cell count to be assignable. |
@@ -47,9 +47,12 @@ physical **packs** that you actually fly and that accumulate cycles.
 Buttons: **Save**, **Back**, **Delete** (existing profiles only), and **Reset
 name** (only while the name is a manual override).
 
-> **Text entry** (Name, Manufacturer): the wheel spins through a character ring;
-> the **MDL** key switches the ring group (**ABC** → **abc** → **123#**). The
-> name field holds up to 30 characters.
+> **Text entry** (Name, Manufacturer): the wheel walks the character slots; **ENTER**
+> on a slot opens the character ring (wheel picks the character, the **MDL** key
+> switches the ring group **ABC** → **abc** → **123#**). At the right of the row sit
+> two buttons — **Done** commits, and **Clear** (rightmost) empties the whole field.
+> **RTN** discards the edit. The name field holds up to 30 characters; committing an
+> empty Name reverts it to the auto name.
 
 ### Packs
 
@@ -106,17 +109,20 @@ with the model.
 
 ## Settings (global)
 
-| Item | Notes |
+The two warnings (**Low**, **Critical**) are shown as rows; dive into a row to
+reach its **Threshold**, **Sound**, and **Play** cells. Two reset buttons sit
+below.
+
+| Column / button | Notes |
 |---|---|
-| **Low threshold** | Global **warn** percentage (**1–99 %**, default **30 %**). The first voice announcement. |
-| **Critical threshold** | Global **critical** percentage (default **20 %**). The second announcement. Saving is blocked unless **Low is above Critical**. |
-| **Test low sound** | Plays `warn.wav` so you can check it exists and the volume is up. |
-| **Test critical sound** | Plays `crit.wav`. |
+| **Threshold** | The warning percentage. **Low** default **30 %**, **Critical** default **20 %** (both **1–99 %**). Saving is blocked unless **Low is above Critical**. Low is the first voice announcement, Critical the second. |
+| **Sound** | Which file plays for that warning: **Default** (the bundled `warn.wav` / `crit.wav`), or any custom `*.wav` you've dropped into `/SOUNDS/en/scripts/LIPONY/`. Pick it from the popup list. A selected file that later goes missing falls back to the default. |
+| **Play** | Plays the row's currently selected sound, so you can check it exists and the volume is up. |
 | **Reset statistics** | Zeroes every pack's cycle count and empties the archive. |
 | **Reset configuration** | Restores factory defaults; **all** batteries and models are erased. |
 
 Per-profile **Low/Critical** overrides (above) take precedence over these global
-values for that profile.
+threshold values for that profile.
 
 > Changes you save in the tool are picked up by a running widget within a few
 > seconds (it re-reads `config.lua` on its own), so no radio restart is needed.

@@ -34,8 +34,9 @@ These are normal, not errors; the widget is waiting for something:
 ## Other issues
 
 **No voice warning?**
-- Check that `/SOUNDS/en/scripts/LIPONY/warn.wav` and `crit.wav` exist.
-- Use **Settings → Test low sound / Test critical sound** to confirm playback.
+- Check that the selected sound file exists in `/SOUNDS/en/scripts/LIPONY/`
+  (the defaults are `warn.wav` / `crit.wav`).
+- Use the **Play** button next to each warning in **Settings** to confirm playback.
 - Make sure the radio volume is up.
 
 **Tool says "Save failed" on first run?**
