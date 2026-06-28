@@ -34,10 +34,14 @@ These are normal, not errors; the widget is waiting for something:
 ## Other issues
 
 **No voice warning?**
-- Check that the selected sound file exists in `/SOUNDS/en/scripts/LIPONY/`
+- Check that the selected sound file exists in `/SOUNDS/en/SCRIPTS/LIPONY/`
   (the defaults are `warn.wav` / `crit.wav`).
 - Use the **Play** button next to each warning in **Settings** to confirm playback.
 - Make sure the radio volume is up.
+
+**No haptic buzz?**
+- Enable **Settings → Haptic feedback** (it's **Off** by default).
+- Radios without a vibration motor can't buzz; the setting is simply ignored there.
 
 **Tool says "Save failed" on first run?**
 The data folder `/SCRIPTS/LIPONY/` is missing. EdgeTX/Lua can't create folders,

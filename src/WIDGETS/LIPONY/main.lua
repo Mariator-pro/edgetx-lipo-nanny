@@ -50,7 +50,7 @@ local CONFIRM_FILL_OPACITY = 8
 -- matching EdgeTX's own LVGL 480-baseline. Wider screens scale up by S = LCD_W/480
 -- (an 800 px screen → S ≈ 1.67; a 480 px screen → S = 1.0).
 local REF_W = 480
-local S     = LCD_W / REF_W
+local S     = (LCD_W or REF_W) / REF_W
 local TH    = math.floor(18 * S + 0.5)  -- standard line height for default font
 local function sx(v) return math.floor(v * S + 0.5) end
 
@@ -71,7 +71,7 @@ local METRIC_GAP = sx(1)
 -- its own near-black panel; LIGHT stays transparent (radio theme shows through) with
 -- black text. `accent` is the OK/"good"-state green (%/bar/glyph/voltage); the
 -- yellow/red escalation colours are identical in both themes. The brand/heading
--- colour is a SEPARATE variable (BRAND, below) so the TxtColor option can recolour
+-- colour is a SEPARATE variable (BRAND, below) so the Accent option can recolour
 -- the marque without ever touching these state colours.
 local DARK = {
   panel   = lcd.RGB( 18,  20,  18),   -- near-black background
@@ -89,27 +89,31 @@ local LIGHT = {
   track   = lcd.RGB(200, 200, 205),   -- light-grey empty track
   transparent = true,
 }
+-- Escalation colours, theme-independent (warn = yellow, crit = red).
+local WARN_COL = lcd.RGB(255, 180,   0)
+local CRIT_COL = lcd.RGB(220,  40,  40)
 -- Active palette; reassigned each frame in refresh() from ctx.cfg.Theme.
 local COLORS = DARK
 
--- Brand/heading colour, resolved once per frame in refresh() from the TxtColor
+-- Brand/heading colour, resolved once per frame in refresh() from the Accent
 -- option. Kept apart from COLORS.accent on purpose: sharing one variable would let
 -- the option bleed into the bar/%/voltage state colours. Default is the active
 -- palette's accent green, so each theme keeps its own green when set to "Default".
 local BRAND = DARK.accent
 
--- Resolves the brand colour from the TxtColor CHOICE (opt) and the CustomCol picker.
--- COLOR_THEME_FOCUS and the picker value can be theme indices, not raw RGB, so
--- lcd.getColor() normalises both into a real RGB usable by setColor/drawText. Read
--- defensively (opt 2/3, else Default) so an uninitialised -1 still renders as Default.
+-- Resolve the brand text colour from the Accent option: "Theme" pulls the active
+-- EdgeTX theme's focus colour, "Custom" the AccentColor picker value. lcd.getColor
+-- normalises either to a real RGB (the picker value may be a theme index, not raw
+-- RGB). Falls back to the palette accent (Default) if unavailable.
 local function brandColor(opt, customCol)
-  if opt == 2 and lcd.getColor then                -- Theme focus colour
-    local c = lcd.getColor(COLOR_THEME_FOCUS); if c then return c end
-  elseif opt == 3 and customCol then               -- Custom picker value
+  if opt == 2 and lcd.getColor then
+    local c = lcd.getColor(COLOR_THEME_FOCUS)
+    if c then return c end
+  elseif opt == 3 and customCol then
     local c = lcd.getColor and lcd.getColor(customCol) or customCol
     if c then return c end
   end
-  return COLORS.accent                             -- Default: per-palette accent green
+  return COLORS.accent
 end
 
 -- Mascot-eye colours (theme-independent).
@@ -118,12 +122,12 @@ local EYE_RIM   = lcd.RGB( 20,  20,  20)
 
 -- Font flags from largest to smallest. XXLSIZE/DBLSIZE/MIDSIZE/SMLSIZE are EdgeTX
 -- globals; 0 is the default font. Used by pickFont() to scale to the zone.
-local FONTS = { XXLSIZE, DBLSIZE, MIDSIZE, 0, SMLSIZE }
+local FONT_STEPS = { XXLSIZE, DBLSIZE, MIDSIZE, 0, SMLSIZE }
 
 -- Largest font flag whose rendered text fits within maxW×maxH, plus its measured
 -- width/height. Falls back to the smallest font if nothing fits.
 local function pickFont(text, maxW, maxH)
-  for _, flag in ipairs(FONTS) do
+  for _, flag in ipairs(FONT_STEPS) do
     local tw, th = lcd.sizeText(text, flag)
     if tw <= maxW and th <= maxH then return flag, tw, th end
   end
@@ -293,8 +297,15 @@ local DEFAULT_SENSOR_LINK     = "RQly"
 
 -- Default voice files; config.sounds.warn/.crit may override them. Missing files
 -- stay silent (playFile no-ops).
-local WARN_SOUND = "/SOUNDS/en/scripts/LIPONY/warn.wav"
-local CRIT_SOUND = "/SOUNDS/en/scripts/LIPONY/crit.wav"
+local WARN_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/warn.wav"
+local CRIT_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/crit.wav"
+
+-- Optional haptic alongside the warning sounds, off by default. strength 1..3 maps to
+-- a pulse length here (tune on the radio); the Tools-script mirrors this range.
+local HAPTIC_STRENGTH_MIN     = 1
+local HAPTIC_STRENGTH_MAX     = 3
+local HAPTIC_STRENGTH_DEFAULT = 2
+local HAPTIC_DUR = { [1] = 15, [2] = 30, [3] = 50 }
 
 -- Defensive wrappers for the firmware calls: keep one bad sensor or a malformed
 -- model.getInfo from tanking the whole cycle, and stay usable from refresh() too
@@ -469,6 +480,7 @@ local function resetFlightState(ctx)
   ctx.timeLeftStr         = nil   -- recompute the displayed time-left promptly
   ctx.timeLeftStamp       = nil
   ctx.restVoltage         = nil
+  ctx.minVCell            = nil   -- lowest per-cell voltage seen this flight (statistics)
   ctx.startSoc            = nil
   ctx.startOffsetMah      = nil
   ctx.selectedProfile     = nil
@@ -609,13 +621,20 @@ end
 -- concurrent tool edits survive, add each bump onto its instance, write back. A bad
 -- read or failed write keeps the bumps pending; a bump for a vanished pack is dropped.
 local function flushCycles(ctx)
-  if not next(ctx.pendingBumps) then return end
+  if not next(ctx.pendingBumps) and not next(ctx.pendingStats) then return end
   local fresh = loadConfig()
   if not fresh then return end   -- missing/parse/schema: leave the file + bumps alone
-  for packId, n in pairs(ctx.pendingBumps) do
-    for _, b in ipairs(fresh.batteries or {}) do
-      for _, inst in ipairs(b.instances or {}) do
-        if inst.id == packId then inst.cycles = (inst.cycles or 0) + n end
+  for _, b in ipairs(fresh.batteries or {}) do
+    for _, inst in ipairs(b.instances or {}) do
+      local n = ctx.pendingBumps[inst.id]
+      if n then inst.cycles = (inst.cycles or 0) + n end
+      local st = ctx.pendingStats[inst.id]
+      if st then
+        if st.mah then inst.totalMah = (inst.totalMah or 0) + math.floor(st.mah + 0.5) end
+        if st.lastUsed then inst.lastUsed = st.lastUsed end
+        if st.minVCell and (not inst.minVCell or st.minVCell < inst.minVCell) then
+          inst.minVCell = st.minVCell
+        end
       end
     end
   end
@@ -623,25 +642,37 @@ local function flushCycles(ctx)
     ctx.config         = fresh            -- refresh the read cache (incl. bumped cycles)
     ctx.lastGeneration = fresh.generation -- our own write; don't re-adopt it next poll
     ctx.pendingBumps   = {}
+    ctx.pendingStats   = {}
   end
 end
 
 -- Called once at the CONNECTED→ENDED transition: records a +1 cycle bump for each
 -- used pack that drew more than 10% of its capacity this flight (parallel splits the
--- consumption evenly), then flushes the bumps to config.lua.
+-- consumption evenly), records the per-pack statistics (consumed mAh, last-used date,
+-- lowest cell voltage), then flushes everything to config.lua.
 local function finalizeFlight(ctx)
   local profile   = ctx.selectedProfile
   local instances = ctx.selectedInstances
   if profile and profile.capacityMah and instances and #instances > 0 then
-    -- The consumed mAh is split evenly across the used packs (50/50 in parallel);
-    -- each pack earns a cycle when its share exceeds 10% of ITS effective capacity.
+    -- The consumed mAh is split evenly across the used packs (50/50 in parallel).
     local perBattery = (ctx.capacity or 0) / #instances
+    local dt   = getDateTime()
+    local date = string.format("%04d-%02d-%02d", dt.year, dt.mon, dt.day)
     for _, inst in ipairs(instances) do
       if inst.id then
         local effCap = profile.capacityMah * (1 - (inst.wear or 0) / 100)
+        -- Cycle: only when the pack drew more than 10% of ITS effective capacity.
         if effCap > 0 and perBattery > 0.10 * effCap then
           ctx.pendingBumps[inst.id] = (ctx.pendingBumps[inst.id] or 0) + 1
         end
+        -- Statistics: recorded for every used pack, independent of the cycle threshold.
+        local st = ctx.pendingStats[inst.id] or {}
+        st.mah      = (st.mah or 0) + perBattery
+        st.lastUsed = date
+        if ctx.minVCell and (not st.minVCell or ctx.minVCell < st.minVCell) then
+          st.minVCell = ctx.minVCell
+        end
+        ctx.pendingStats[inst.id] = st
       end
     end
   end
@@ -676,6 +707,11 @@ local function updateStateMachine(ctx)
       if ctx.current and ctx.current > 0 then
         ctx.currentSumA        = ctx.currentSumA + ctx.current
         ctx.currentSampleCount = ctx.currentSampleCount + 1
+      end
+      -- Lowest per-cell voltage this flight (statistics): tracked under load.
+      if ctx.voltage and ctx.cells and ctx.cells > 0 then
+        local vCell = ctx.voltage / ctx.cells
+        if not ctx.minVCell or vCell < ctx.minVCell then ctx.minVCell = vCell end
       end
     elseif (now - ctx.lastTelemetryTime) >= ENDED_TIMEOUT then
       if ctx.selectedProfile then
@@ -892,8 +928,6 @@ end
 -- ABOVE the bar and the CRIT caption BELOW it — so the two never collide even when
 -- the thresholds sit close together. Caller must leave one text line above and
 -- below the bar.
-local THR_YELLOW = lcd.RGB(255, 180, 0)
-local THR_RED    = lcd.RGB(220,  40, 40)
 local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
   local p     = math.max(0, math.min(100, pct or 0))
@@ -906,8 +940,8 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
     local tx = x + math.floor(w * thr / 100) - math.floor(tickW / 2)
     lcd.drawFilledRectangle(tx, y - sx(1), tickW, h + sx(2), col)
   end
-  tick(warn, THR_YELLOW)
-  tick(crit, THR_RED)
+  tick(warn, WARN_COL)
+  tick(crit, CRIT_COL)
   if withLabels then
     local _, lh = lcd.sizeText("0", SMLSIZE)
     local function label(thr, txt, col, ly)
@@ -916,8 +950,8 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
       if lx < x then lx = x elseif lx + tw > x + w then lx = x + w - tw end
       dtext(lx, ly, txt, col, SMLSIZE)
     end
-    label(warn, string.format("WARN %d %%", warn), THR_YELLOW, y - lh - sx(1))  -- above
-    label(crit, string.format("CRIT %d %%", crit), THR_RED,    y + h + sx(2))   -- below
+    label(warn, string.format("WARN %d %%", warn), WARN_COL, y - lh - sx(1))  -- above
+    label(crit, string.format("CRIT %d %%", crit), CRIT_COL,    y + h + sx(2))   -- below
   end
 end
 
@@ -958,8 +992,8 @@ local function voltageColor(ctx)
   end
   local vpc = ctx.voltage / ctx.cells
   if vpc >= chem.voltageWarn then return COLORS.accent end
-  if vpc >= chem.voltageCrit then return THR_YELLOW   end
-  return THR_RED
+  if vpc >= chem.voltageCrit then return WARN_COL   end
+  return CRIT_COL
 end
 
 -- Builds the display strings/colours once for the active CONNECTED metrics.
@@ -1194,7 +1228,7 @@ local function drawHeartbeat(ctx)
   if not isOnline(ctx) then return end
   if math.floor(getTime() / HEARTBEAT_HALF) % 2 ~= 0 then return end
   local r = sx(3)
-  lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, THR_RED)
+  lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, CRIT_COL)
 end
 
 -- True when the FULL two-column layout fits the zone. Both checks are in absolute
@@ -1239,7 +1273,7 @@ end
 
 -- Message fonts, largest first: the default (STD) font when the lines fit, else
 -- SMLSIZE. Two discrete steps only, so the per-line height stays predictable.
-local MSG_FONTS = { 0, SMLSIZE }
+local MSG_FONT_STEPS = { 0, SMLSIZE }
 
 -- Fixed line height for a message font: its text height plus a small gap.
 local function msgLineH(flag)
@@ -1247,10 +1281,10 @@ local function msgLineH(flag)
   return th + sx(2)
 end
 
--- Largest MSG_FONTS flag whose `lines` fit `availW` wide AND `availH` tall;
+-- Largest MSG_FONT_STEPS flag whose `lines` fit `availW` wide AND `availH` tall;
 -- falls back to SMLSIZE. Returns the flag and its line height.
 local function pickMsgFont(lines, availW, availH)
-  for _, flag in ipairs(MSG_FONTS) do
+  for _, flag in ipairs(MSG_FONT_STEPS) do
     local lineH = msgLineH(flag)
     local fits  = #lines * lineH <= availH
     for _, t in ipairs(lines) do
@@ -1470,6 +1504,8 @@ local function applySelection(ctx, profile, instances)
     local fromV = socFromVoltage(chem, ctx.restVoltage, ctx.cells)
     if fromV then soc = fromV end
   end
+  -- startSoc is a write-only intermediate: production code consumes only the derived
+  -- startOffsetMah below. It is kept solely as an observable the SoC-lookup tests assert on.
   ctx.startSoc       = soc
   -- Offset spans the whole (effective) pack capacity, so it covers both packs in
   -- parallel and shrinks with wear — consistent with effectiveCapacityMah.
@@ -1500,8 +1536,8 @@ end
 -- Battery detection at connect. Runs once the resting voltage is available and
 -- nothing is selected/pending yet:
 --   single:   1 candidate → auto-select; 0 or >1 → popup
---   parallel: always a 2-slot popup (the tools-script guarantees one assigned
---             profile with two or more packs, so two are always available);
+--   parallel: always a 2-slot popup (every assignable profile has two or more
+--             packs, so the slot-1 profile always has a second pack for slot 2);
 --             per-slot auto-select happens while the popup is open.
 -- No assigned profile of the model's cell count → cell-count-mismatch tile.
 local function detectBattery(ctx)
@@ -1529,6 +1565,21 @@ local function detectBattery(ctx)
   end
 end
 
+-- Vibrate with a warning: pulses=1 normal, 2 = stronger critical cue. No-op when haptic
+-- is off or playHaptic is absent (sim / motorless radio), so it never affects the logic.
+local function warnHaptic(ctx, pulses)
+  local cfg = ctx.config
+  if not cfg or cfg.haptic ~= true or not playHaptic then return end
+  local s = cfg.hapticStrength
+  if type(s) ~= "number" then s = HAPTIC_STRENGTH_DEFAULT end
+  if s < HAPTIC_STRENGTH_MIN then s = HAPTIC_STRENGTH_MIN
+  elseif s > HAPTIC_STRENGTH_MAX then s = HAPTIC_STRENGTH_MAX end
+  local dur = HAPTIC_DUR[s] or HAPTIC_DUR[HAPTIC_STRENGTH_DEFAULT]
+  for i = 1, pulses do
+    playHaptic(dur, (i < pulses) and dur or 0)   -- gap between pulses, none after the last
+  end
+end
+
 -- Plays the warn / crit voice file once each as the remaining percentage drops
 -- past the thresholds. No debounce: the mAh counter only rises, so each
 -- threshold is crossed exactly once per flight.
@@ -1542,10 +1593,12 @@ local function evaluateWarnings(ctx)
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
     playFile(sounds.warn or WARN_SOUND)
+    warnHaptic(ctx, 1)
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
     playFile(sounds.crit or CRIT_SOUND)
+    warnHaptic(ctx, 2)
   end
 end
 
@@ -1853,8 +1906,8 @@ local function create(zone, options)
     zone = zone,
 
     -- Widget options (see table at end of file): cfg.Theme = 1 dark / 2 light,
-    -- cfg.Transparency = milky-overlay strength 0–5, cfg.TxtColor = brand colour
-    -- mode (1 Default / 2 Theme / 3 Custom), cfg.CustomCol = picker value for Custom.
+    -- cfg.Transparency = milky-overlay strength 0–5, cfg.Accent = brand colour
+    -- mode (1 Default / 2 Theme / 3 Custom), cfg.AccentColor = picker value for Custom.
     cfg = options,
 
     -- State machine
@@ -1873,7 +1926,10 @@ local function create(zone, options)
     -- Cycle counts live on the config instances. pendingBumps holds cycles earned
     -- this session but not yet written (survives failed writes for a later retry);
     -- they are flushed onto config.lua at flight end (read-modify-write).
+    -- pendingStats holds per-pack statistic deltas earned alongside the cycle (consumed
+    -- mAh, last-used date, lowest cell voltage), flushed in the same write.
     pendingBumps = {},
+    pendingStats = {},
 
     -- Telemetry — last valid values. rawVoltage = latest unvalidated RxBt,
     -- used as online fallback when RQly is missing.
@@ -2056,7 +2112,7 @@ local function refresh(ctx, event, touchEvent)
 
   -- Brand/heading colour for this frame (after the palette so the "Default" fallback
   -- picks up the active palette's accent). State colours stay on COLORS.accent.
-  BRAND = brandColor(ctx.cfg and ctx.cfg.TxtColor, ctx.cfg and ctx.cfg.CustomCol)
+  BRAND = brandColor(ctx.cfg and ctx.cfg.Accent, ctx.cfg and ctx.cfg.AccentColor)
 
   -- DARK paints its own panel so the tile looks the same on any radio theme; LIGHT
   -- leaves the background transparent so the radio theme shows through.
@@ -2082,11 +2138,11 @@ return {
     -- 0–5 (default 2), applied in the Light theme only (Dark stays solid black).
     { "Theme", CHOICE, 1, { "Dark", "Light" } },
     { "Transparency", VALUE, 2, 0, 5 },
-    -- Brand/heading colour. TxtColor: 1 Default (per-palette green), 2 Theme
-    -- (COLOR_THEME_FOCUS), 3 Custom (CustomCol). CustomCol shows the native colour
-    -- picker; only used when TxtColor = Custom, default = the original Dark lime.
-    { "TxtColor", CHOICE, 1, { "Default", "Theme", "Custom" } },
-    { "CustomCol", COLOR, lcd.RGB(124, 210, 48) },
+    -- Brand/heading colour. Accent: 1 Default (per-palette green), 2 Theme
+    -- (COLOR_THEME_FOCUS), 3 Custom (AccentColor). AccentColor shows the native colour
+    -- picker; only used when Accent = Custom, default = the original Dark lime.
+    { "Accent", CHOICE, 1, { "Default", "Theme", "Custom" } },
+    { "AccentColor", COLOR, lcd.RGB(124, 210, 48) },
   },
   create     = create,
   update     = update,

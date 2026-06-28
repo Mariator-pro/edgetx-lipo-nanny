@@ -26,8 +26,8 @@ local VERSION        = "1.1.0"
 local SCHEMA_VERSION = 1
 local PATHS = {
   config    = "/SCRIPTS/LIPONY/config.lua",
-  soundDir  = "/SOUNDS/en/scripts/LIPONY/",   -- trailing slash: prefix for full paths
-  soundList = "/SOUNDS/en/scripts/LIPONY",    -- no trailing slash: passed to dir()
+  soundDir  = "/SOUNDS/en/SCRIPTS/LIPONY/",   -- trailing slash: prefix for full paths
+  soundList = "/SOUNDS/en/SCRIPTS/LIPONY",    -- no trailing slash: passed to dir()
 }
 PATHS.warnSound = PATHS.soundDir .. "warn.wav"
 PATHS.critSound = PATHS.soundDir .. "crit.wav"
@@ -36,25 +36,28 @@ PATHS.critSound = PATHS.soundDir .. "crit.wav"
 -- Serialization (same table shape the widget loads) + file write
 -- ---------------------------------------------------------------------------
 
-local function quoteString(s)
+-- Config IO + serialization.
+local Cfg = {}
+
+function Cfg.quoteString(s)
   s = string.gsub(s, "\\", "\\\\")
   s = string.gsub(s, '"', '\\"')
   s = string.gsub(s, "\n", "\\n")
   return '"' .. s .. '"'
 end
 
-local function serialize(value, indent)
+function Cfg.serialize(value, indent)
   local t = type(value)
   if t == "number" or t == "boolean" then
     return tostring(value)
   elseif t == "string" then
-    return quoteString(value)
+    return Cfg.quoteString(value)
   elseif t == "table" then
     local nextIndent = indent .. "  "
     local parts      = {}
     local arrayLen   = #value
     for i = 1, arrayLen do
-      parts[#parts + 1] = nextIndent .. serialize(value[i], nextIndent)
+      parts[#parts + 1] = nextIndent .. Cfg.serialize(value[i], nextIndent)
     end
     for k, v in pairs(value) do
       local isArrayIndex = type(k) == "number" and k >= 1 and k <= arrayLen
@@ -62,11 +65,11 @@ local function serialize(value, indent)
       if not isArrayIndex then
         local keyStr
         if type(k) == "string" then
-          keyStr = "[" .. quoteString(k) .. "]"
+          keyStr = "[" .. Cfg.quoteString(k) .. "]"
         else
           keyStr = "[" .. tostring(k) .. "]"
         end
-        parts[#parts + 1] = nextIndent .. keyStr .. " = " .. serialize(v, nextIndent)
+        parts[#parts + 1] = nextIndent .. keyStr .. " = " .. Cfg.serialize(v, nextIndent)
       end
     end
     if #parts == 0 then return "{}" end
@@ -76,7 +79,7 @@ local function serialize(value, indent)
 end
 
 -- Reads a whole file (block reads; "a" format is not on every build), or nil.
-local function readFile(path)
+function Cfg.readFile(path)
   local ok, f = pcall(io.open, path, "r")
   if not ok or not f then return nil end
   local parts = {}
@@ -92,8 +95,8 @@ end
 -- io.open "w" does NOT truncate on some EdgeTX/SD builds, so a shorter write would
 -- leave the old tail behind — pad with trailing newlines (valid after the table) up
 -- to the old length. Pcall-wrapped so a full/read-only SD never raises.
-local function writeFile(path, content)
-  local old = readFile(path)
+function Cfg.writeFile(path, content)
+  local old = Cfg.readFile(path)
   if old and #old > #content then
     content = content .. string.rep("\n", #old - #content)
   end
@@ -110,7 +113,7 @@ end
 
 -- Returns (config) on success, or (nil, errKind, detail) where errKind is
 -- "missing" | "parse" | "schema".
-local function loadConfig()
+function Cfg.loadConfig()
   local ok, f = pcall(io.open, PATHS.config, "r")
   if not ok or not f then return nil, "missing" end
   pcall(io.close, f)
@@ -126,7 +129,32 @@ local function loadConfig()
   return result
 end
 
-local function defaultConfig()
+-- Haptic strength range mirrors the widget; labels are the three user-facing steps,
+-- dur maps strength 1..3 to a pulse length (kept in sync with the widget).
+local HAPTIC = { min = 1, max = 3, default = 2,
+                 labels = { "Soft", "Normal", "Strong" }, dur = { 15, 30, 50 } }
+
+-- A config's strength, clamped to range and defaulted when missing/garbage.
+function HAPTIC.strengthOf(cfg)
+  local hs = cfg.hapticStrength
+  if type(hs) == "number" and hs >= HAPTIC.min and hs <= HAPTIC.max then return hs end
+  return HAPTIC.default
+end
+
+-- Vibration for the settings Test button, mirroring the warning cue: pulses=1 for
+-- Low, 2 for Critical. Uses the strength currently set in the tool (not the saved
+-- config). No-op when haptic is off or playHaptic is absent (desktop / motorless).
+function HAPTIC.test(on, strength, pulses)
+  if not on or not playHaptic then return end
+  local s = strength
+  if type(s) ~= "number" or s < HAPTIC.min or s > HAPTIC.max then s = HAPTIC.default end
+  local dur = HAPTIC.dur[s]   -- s is clamped to 1..3, so always a valid index
+  for i = 1, pulses do
+    playHaptic(dur, (i < pulses) and dur or 0)   -- gap between pulses, none after the last
+  end
+end
+
+function Cfg.defaultConfig()
   return {
     schemaVersion = SCHEMA_VERSION,
     generation    = 0,
@@ -140,11 +168,11 @@ local function defaultConfig()
 end
 
 -- Increments the reload sentinel and writes the config. Returns true on success.
-local function saveConfig(cfg)
+function Cfg.saveConfig(cfg)
   cfg.generation = (cfg.generation or 0) + 1
   local content = "-- Lipo-Nanny configuration (auto-generated by the Tools-Script).\n"
-                  .. "return " .. serialize(cfg, "") .. "\n"
-  return writeFile(PATHS.config, content)
+                  .. "return " .. Cfg.serialize(cfg, "") .. "\n"
+  return Cfg.writeFile(PATHS.config, content)
 end
 
 -- ---------------------------------------------------------------------------
@@ -207,6 +235,7 @@ local SCREEN = {
   BATTERIES    = "batteries",
   PROFILE      = "profile",
   PACKS        = "packs",
+  STATS        = "stats",
   MODELS       = "models",
   MODEL        = "model",
   ASSIGN       = "assign",
@@ -237,8 +266,7 @@ local SENSOR_FIELDS = {
       "Link/signal quality for online detect.",
       "Any value >0 = receiving. e.g. RQly, RSSI." } },
 }
-local MFR_MAX  = 10
-local NAME_MAX = 30
+local TEXT_MAX = { mfr = 10, name = 30 }   -- manufacturer / profile-name char caps
 
 -- Character groups for the ring picker. The active group is tracked in S.charGroup, so
 -- the wheel cycles within one group and wraps at its ends; MDL jumps to the next group's
@@ -271,6 +299,13 @@ local S = {
   defField   = nil,
   defOrig    = nil,
 }
+
+-- Per-screen draw/handle entry points as fields of one table (not 28 top-level locals)
+-- to stay under Lua's 200-local cap. The dispatcher routes through it.
+local Screen = {}
+
+-- enter*/open* navigation; table fields let them call each other without forward decls.
+local Nav = {}
 
 -- ---------------------------------------------------------------------------
 -- Event helpers (virtual keys)
@@ -314,12 +349,18 @@ local COL1 = PAD * 2                    -- label / entry column
 local COL2 = math.floor(LCD_W * 0.42)   -- value column (two-column editor fields)
 
 -- Packs table column x-anchors (computed from the display width).
-local PK_ID, PK_CYC, PK_WEAR, PK_ACT =
-  COL1, math.floor(LCD_W * 0.24), math.floor(LCD_W * 0.46), math.floor(LCD_W * 0.68)
+local PK = { id = COL1, cyc = math.floor(LCD_W * 0.18), wear = math.floor(LCD_W * 0.34),
+             buy = math.floor(LCD_W * 0.52), act = math.floor(LCD_W * 0.82) }
 
 -- Settings table column x-anchors (Warning label / Threshold / Sound / Test).
-local ST_WARN, ST_THR, ST_SND, ST_TEST =
-  COL1, math.floor(LCD_W * 0.26), math.floor(LCD_W * 0.46), math.floor(LCD_W * 0.70)
+local ST = { warn = COL1, thr = math.floor(LCD_W * 0.26),
+             snd = math.floor(LCD_W * 0.46), test = math.floor(LCD_W * 0.70) }
+
+-- Statistics table column x-anchors (ID / cycles / total mAh / min V-cell / last used).
+-- The wide date column comes last so it gets the most room; the numeric columns before
+-- it are narrow enough to fit at the default font.
+local SX = { id = COL1, cyc = math.floor(LCD_W * 0.13), mah = math.floor(LCD_W * 0.30),
+             vmin = math.floor(LCD_W * 0.52), last = math.floor(LCD_W * 0.70) }
 
 local function drawHeader(title)
   local h = LINE + PAD
@@ -371,6 +412,16 @@ local function drawArrowBefore(x, y, color)
   return x + ARROW_W + ARROW_GAP
 end
 
+-- Small filled "i" info badge, sized to SMLSIZE; returns the x where text should start.
+local function drawInfoBadge(x, y)
+  local _, sh = lcd.sizeText("Mg", SMLSIZE)
+  local r     = math.floor(sh / 2)
+  lcd.drawFilledCircle(x + r, y + r, r, COLOR_THEME_FOCUS)
+  local iw = lcd.sizeText("i", SMLSIZE)
+  lcd.drawText(x + r - math.floor(iw / 2), y, "i", COLOR_THEME_PRIMARY2 + SMLSIZE)
+  return x + 2 * r + ARROW_GAP
+end
+
 -- A two-column field row at an explicit y: label at COL1, value at COL2. Only the
 -- value is highlighted — INVERS when selected, BLINK+INVERS while editing — except a
 -- folder field (opens a sub-page), where the whole row inverts. opts.popup adds a
@@ -404,6 +455,28 @@ local BTN_GAP = 8
 local function barTopY()
   local _, th = lcd.sizeText("Mg")
   return LCD_H - (th + 4) - 2 * BTN_GAP
+end
+
+-- Scroll window for a list of `n` rows starting at body row `top`, keeping `focus`
+-- centred and clamped so neither end shows blank rows. Returns (start, last) row
+-- indices into the list. Shared by every scrolling page (Batteries/Models/Packs/…).
+local function scrollWindow(focus, n, top)
+  local maxRows = math.max(1, math.floor((barTopY() - bodyY(top)) / LINE))
+  focus = math.max(1, math.min(focus, n))
+  local start = math.max(1, math.min(focus - math.floor(maxRows / 2), n - maxRows + 1))
+  if start < 1 then start = 1 end
+  return start, math.min(n, start + maxRows - 1)
+end
+
+-- Track + proportional thumb at column `sx` (`shown` of `total` rows from `top`). No-op
+-- when everything fits, so callers can call it unconditionally. Shared by picker + pages.
+local function drawScrollbar(sx, listY, shown, top, total)
+  if shown >= total then return end
+  local trackH = shown * LINE
+  lcd.drawFilledRectangle(sx, listY, 3, trackH, COLOR_THEME_PRIMARY3)
+  local thumbH = math.max(6, math.floor(trackH * shown / total))
+  local thumbY = listY + math.floor(trackH * (top - 1) / total)
+  lcd.drawFilledRectangle(sx, thumbY, 3, thumbH, COLOR_THEME_FOCUS)
 end
 
 -- Draws one button at (x, y): outlined, or filled with the accent colour when focused.
@@ -463,53 +536,89 @@ end
 -- Generic confirm dialog
 -- ---------------------------------------------------------------------------
 
-local function openDialog(text, onYes, yesLabel, noLabel)
+function Nav.openDialog(text, onYes, yesLabel, noLabel)
   S.dialog = { text = text, onYes = onYes, cursor = 2,  -- default to the safe answer
                yes = yesLabel or "Yes", no = noLabel or "No" }
 end
 
 -- Modal info popup with a single [ OK ] button (dismiss with ENTER/EXIT). Used for
 -- validation / blocked-action messages so they never overlap the screen content.
-local function openAlert(text)
+function Nav.openAlert(text)
   S.dialog = { text = text, alert = true }
 end
 
+-- Like openAlert, but renders {label, value} rows in two pixel-aligned columns
+-- (geometry computed in drawDialog, where sizeText is valid). For label:value lists.
+function Nav.openInfoRows(rows)
+  S.dialog = { rows = rows, alert = true }
+end
+
 -- Word-wraps `text` to lines no wider than maxW px, breaking on spaces (a single
--- word wider than maxW keeps its own line rather than splitting mid-word).
+-- word wider than maxW keeps its own line rather than splitting mid-word). An
+-- explicit "\n" forces a break, so callers can lay out labelled blocks (e.g. paths).
 local function wrapText(text, maxW)
-  local lines, line = {}, ""
-  local i, n = 1, #text
-  while i <= n do
-    local sp = string.find(text, " ", i, true)
-    local word
-    if sp then word = string.sub(text, i, sp - 1); i = sp + 1
-    else       word = string.sub(text, i);         i = n + 1 end
-    local cand = (line == "") and word or (line .. " " .. word)
-    if line ~= "" and lcd.sizeText(cand) > maxW then
-      lines[#lines + 1] = line
-      line = word
-    else
-      line = cand
+  local lines = {}
+  local segStart = 1
+  while true do
+    local nl  = string.find(text, "\n", segStart, true)
+    local seg = string.sub(text, segStart, nl and nl - 1 or #text)
+    local line = ""
+    local i, n = 1, #seg
+    while i <= n do
+      local sp = string.find(seg, " ", i, true)
+      local word
+      if sp then word = string.sub(seg, i, sp - 1); i = sp + 1
+      else       word = string.sub(seg, i);         i = n + 1 end
+      local cand = (line == "") and word or (line .. " " .. word)
+      if line ~= "" and lcd.sizeText(cand) > maxW then
+        lines[#lines + 1] = line
+        line = word
+      else
+        line = cand
+      end
     end
+    lines[#lines + 1] = line
+    if not nl then break end
+    segStart = nl + 1
   end
-  lines[#lines + 1] = line
   return lines
 end
 
-local function drawDialog()
+function Screen.drawDialog()
   local d = S.dialog
   dimScreen()
-  local w     = math.floor(LCD_W * 0.8)
+  -- Two-column rows (label:value): size from the widest label + widest value so the
+  -- value column aligns to one pixel position. Otherwise wrap the plain text to 80%.
+  local lines, labelW, valueW = nil, 0, 0
+  if d.rows then
+    for _, r in ipairs(d.rows) do
+      labelW = math.max(labelW, lcd.sizeText(r[1]))
+      valueW = math.max(valueW, lcd.sizeText(r[2]))
+    end
+  end
+  local nRows = d.rows and #d.rows or 0
+  local w = d.rows and math.min(LCD_W - 2 * PAD, labelW + PAD + valueW + 2 * PAD)
+                    or  math.floor(LCD_W * 0.8)
   local x     = math.floor((LCD_W - w) / 2)
-  local lines = wrapText(d.text, w - 2 * PAD)
-  local h     = (#lines + 2) * LINE + PAD * 2   -- text lines + gap + button row
+  if not d.rows then lines = wrapText(d.text, w - 2 * PAD) end
+  local rowN  = d.rows and nRows or #lines
+  local h     = (rowN + 2) * LINE + PAD * 2   -- content rows + gap + button row
   local y     = math.floor((LCD_H - h) / 2)
   -- Drop shadow, light body, thin frame (matches the picker popup).
   lcd.drawFilledRectangle(x + 3, y + 3, w, h, COLOR_THEME_PRIMARY1)
   lcd.drawFilledRectangle(x, y, w, h, COLOR_THEME_SECONDARY3)
   lcd.drawRectangle(x, y, w, h, COLOR_THEME_SECONDARY1)
-  for i, line in ipairs(lines) do
-    lcd.drawText(x + PAD, y + PAD + (i - 1) * LINE, line, COLOR_THEME_PRIMARY1)
+  if d.rows then
+    local valueX = x + PAD + labelW + PAD   -- value column starts past the widest label
+    for i, r in ipairs(d.rows) do
+      local ry = y + PAD + (i - 1) * LINE
+      lcd.drawText(x + PAD, ry, r[1], COLOR_THEME_PRIMARY1)
+      lcd.drawText(valueX,  ry, r[2], COLOR_THEME_PRIMARY1)
+    end
+  else
+    for i, line in ipairs(lines) do
+      lcd.drawText(x + PAD, y + PAD + (i - 1) * LINE, line, COLOR_THEME_PRIMARY1)
+    end
   end
   -- Buttons styled like the bottom bar (Back/Save): outlined, focus-filled when selected.
   local btnY = y + h - LINE - PAD
@@ -522,7 +631,7 @@ local function drawDialog()
   end
 end
 
-local function handleDialog(e)
+function Screen.handleDialog(e)
   local d = S.dialog
   if d.alert then
     if isEnter(e) or isExit(e) then S.dialog = nil end
@@ -544,8 +653,8 @@ end
 -- Generic scrollable picker popup
 -- ---------------------------------------------------------------------------
 
--- Most rows shown at once; longer lists scroll.
-local PICKER_MAX_ROWS = 5
+-- Picker geometry: most rows shown at once (longer lists scroll) + left indent.
+local PICK = { rows = 5, indent = 8 }
 
 -- Keeps the highlighted row inside the visible window.
 local function pickerEnsureVisible(rows)
@@ -556,7 +665,7 @@ local function pickerEnsureVisible(rows)
 end
 
 -- `sel` pre-selected, `onPick(idx)` runs on ENTER, EXIT cancels.
-local function openPicker(title, labels, sel, onPick)
+function Nav.openPicker(title, labels, sel, onPick)
   S.picker = { title = title, labels = labels, sel = sel or 1, top = 1, onPick = onPick }
 end
 
@@ -564,11 +673,10 @@ end
 local function pickerRows()
   local _, th  = lcd.sizeText("Mg")
   local maxFit = math.floor((LCD_H - 2 * LINE - th - 2 * PAD) / LINE)
-  return math.max(1, math.min(PICKER_MAX_ROWS, #S.picker.labels, maxFit))
+  return math.max(1, math.min(PICK.rows, #S.picker.labels, maxFit))
 end
 
-local PICK_INDENT = 8
-local function drawPicker()
+function Screen.drawPicker()
   local p     = S.picker
   local n     = #p.labels
   local rows  = pickerRows()
@@ -590,8 +698,8 @@ local function drawPicker()
 
   -- Title bar + "selected/total" counter.
   lcd.drawFilledRectangle(x, y, w, headH, COLOR_THEME_SECONDARY1)
-  lcd.drawText(x + PICK_INDENT, y + 3, p.title, COLOR_THEME_PRIMARY2 + BOLD)
-  lcd.drawText(x + w - PICK_INDENT, y + 3, p.sel .. "/" .. n, COLOR_THEME_PRIMARY2 + RIGHT)
+  lcd.drawText(x + PICK.indent, y + 3, p.title, COLOR_THEME_PRIMARY2 + BOLD)
+  lcd.drawText(x + w - PICK.indent, y + 3, p.sel .. "/" .. n, COLOR_THEME_PRIMARY2 + RIGHT)
 
   local listY = y + headH
   for i = 0, rows - 1 do
@@ -601,25 +709,17 @@ local function drawPicker()
       if idx == p.sel then
         local barW = w - (hasBar and 5 or 0)
         lcd.drawFilledRectangle(x, ry, barW, LINE, COLOR_THEME_FOCUS)
-        lcd.drawText(x + PICK_INDENT, ry + textY, p.labels[idx], COLOR_THEME_PRIMARY2)
+        lcd.drawText(x + PICK.indent, ry + textY, p.labels[idx], COLOR_THEME_PRIMARY2)
       else
-        lcd.drawText(x + PICK_INDENT, ry + textY, p.labels[idx], COLOR_THEME_PRIMARY1)
+        lcd.drawText(x + PICK.indent, ry + textY, p.labels[idx], COLOR_THEME_PRIMARY1)
       end
     end
   end
 
-  -- Scrollbar when the list overflows.
-  if hasBar then
-    local trackH = rows * LINE
-    local sx     = x + w - 4
-    lcd.drawFilledRectangle(sx, listY, 3, trackH, COLOR_THEME_PRIMARY3)
-    local thumbH = math.max(6, math.floor(trackH * rows / n))
-    local thumbY = listY + math.floor(trackH * (p.top - 1) / n)
-    lcd.drawFilledRectangle(sx, thumbY, 3, thumbH, COLOR_THEME_FOCUS)
-  end
+  drawScrollbar(x + w - 4, listY, rows, p.top, n)
 end
 
-local function handlePicker(e)
+function Screen.handlePicker(e)
   local p = S.picker
   local n = #p.labels
   if isNext(e) or isPrev(e) then
@@ -642,7 +742,7 @@ local function withRetry(writeFn, onDone)
   if writeFn() then
     if onDone then onDone() end
   else
-    openDialog("Save failed — check SD card.",
+    Nav.openDialog("Save failed — check SD card.",
                function() withRetry(writeFn, onDone) end, "Retry", "Cancel")
   end
 end
@@ -651,23 +751,28 @@ end
 -- Destructive resets (shared by Settings and the config-error recovery)
 -- ---------------------------------------------------------------------------
 
--- Zeroes every active pack's cycle count and empties the archive, then saves (the
--- generation bump makes a running widget pick up the cleared counts). Profiles and
--- models are kept. The RAM mutation is idempotent, so a withRetry retry is harmless.
+-- Zeroes every active pack's cycle count and statistics and empties the archive, then
+-- saves (the generation bump makes a running widget pick up the cleared counts).
+-- Profiles and models are kept. The RAM mutation is idempotent, so a withRetry retry is harmless.
 local function resetStats(onDone)
   for _, b in ipairs(S.cfg.batteries) do
-    for _, inst in ipairs(b.instances or {}) do inst.cycles = 0 end
+    for _, inst in ipairs(b.instances or {}) do
+      inst.cycles   = 0
+      inst.totalMah = 0
+      inst.lastUsed = nil
+      inst.minVCell = nil
+    end
   end
   S.cfg.archive = {}
-  withRetry(function() return saveConfig(S.cfg) end, onDone)
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, onDone)
 end
 
 -- Overwrites config.lua with factory defaults (batteries, models, archive and cycle
 -- counts all erased) and clears any parse/schema error. The pack-id counter safely
 -- restarts at 1 — nothing survives the reset that a fresh id could collide with.
 local function resetConfig(onDone)
-  local fresh = defaultConfig()
-  withRetry(function() return saveConfig(fresh) end, function()
+  local fresh = Cfg.defaultConfig()
+  withRetry(function() return Cfg.saveConfig(fresh) end, function()
     S.cfg              = fresh
     S.err, S.errDetail = nil, nil
     if onDone then onDone() end
@@ -678,17 +783,17 @@ end
 -- Screen: first start
 -- ---------------------------------------------------------------------------
 
-local function drawFirstStart()
+function Screen.drawFirstStart()
   drawHeader("LIPO NANNY — FIRST START")
   lcd.drawText(COL1, bodyY(1), "No configuration found.", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(2), "Press ENTER to create defaults.", COLOR_THEME_PRIMARY1)
   drawButtonBar({ "Create" }, 1, 1)
 end
 
-local function handleFirstStart(e)
+function Screen.handleFirstStart(e)
   if isEnter(e) then
-    S.cfg = defaultConfig()
-    withRetry(function() return saveConfig(S.cfg) end, function()
+    S.cfg = Cfg.defaultConfig()
+    withRetry(function() return Cfg.saveConfig(S.cfg) end, function()
       S.screen = SCREEN.MAIN
       S.cursor = 1
     end)
@@ -702,7 +807,7 @@ end
 -- Screen: config error
 -- ---------------------------------------------------------------------------
 
-local function drawConfigError()
+function Screen.drawConfigError()
   drawHeader("CONFIG ERROR")
   if S.err == "schema" then
     lcd.drawText(COL1, bodyY(1), "Schema version mismatch", COLOR_THEME_PRIMARY1)
@@ -716,11 +821,11 @@ local function drawConfigError()
   drawButtonBar({ "Reset config", "Exit" }, 1, S.cursor)
 end
 
-local function handleConfigError(e)
+function Screen.handleConfigError(e)
   S.cursor = moveCursor(S.cursor, e, 2)
   if isEnter(e) then
     if S.cursor == 1 then
-      openDialog("Reset configuration to defaults? All settings are erased.",
+      Nav.openDialog("Reset configuration to defaults? All settings are erased.",
                  function() resetConfig(function() S.screen = SCREEN.MAIN; S.cursor = 1 end) end)
     else
       return 1
@@ -737,15 +842,15 @@ end
 
 local MAIN_ITEMS = { "Batteries", "Models", "Settings", "About" }
 
-local function drawMain()
-  drawHeader("LIPO NANNY — SETUP")
+function Screen.drawMain()
+  drawHeader("LIPO NANNY - SETUP")
   for i, item in ipairs(MAIN_ITEMS) do
     drawNavRow(i, item, S.cursor == i, { folder = true })
   end
   drawButtonBar({ "Exit" }, #MAIN_ITEMS + 1, S.cursor)
 end
 
-local function enterDefaults()
+function Nav.enterDefaults()
   S.def         = { warn = S.cfg.defaults.warn_pct, crit = S.cfg.defaults.crit_pct }
   local files   = listSoundFiles()
   S.sndWarnOpts = buildSoundOptions(PATHS.warnSound, files)
@@ -753,6 +858,8 @@ local function enterDefaults()
   local snd     = S.cfg.sounds or {}
   S.def.warnSnd = soundOptionIndex(S.sndWarnOpts, snd.warn)
   S.def.critSnd = soundOptionIndex(S.sndCritOpts, snd.crit)
+  S.def.haptic         = (S.cfg.haptic == true)   -- only a literal true counts as on
+  S.def.hapticStrength = HAPTIC.strengthOf(S.cfg)
   S.defEditing  = false
   S.defDive     = nil       -- focused warning row (dived in), or nil at top level
   S.defSub      = "thr"     -- active cell once dived: "thr" | "snd" | "test"
@@ -760,7 +867,7 @@ local function enterDefaults()
   S.screen      = SCREEN.DEFAULTS
 end
 
-local function handleMain(e)
+function Screen.handleMain(e)
   S.cursor = moveCursor(S.cursor, e, #MAIN_ITEMS + 1)
   if isEnter(e) then
     if S.cursor > #MAIN_ITEMS then
@@ -774,7 +881,7 @@ local function handleMain(e)
       S.screen = SCREEN.MODELS
       S.cursor = 1
     elseif item == "Settings" then
-      enterDefaults()
+      Nav.enterDefaults()
     elseif item == "About" then
       S.screen = SCREEN.ABOUT
       S.cursor = 1
@@ -789,36 +896,58 @@ end
 -- Screen: About
 -- ---------------------------------------------------------------------------
 
-local ABOUT_LINES = {
-  "(c) Mariator-pro   GPL-2.0",
-  "LIPONY  v" .. VERSION,
-  "Widget: /WIDGETS/LIPONY/main.lua",
-  "Tools:  /SCRIPTS/TOOLS/LIPONY.lua",
-  "Data:   /SCRIPTS/LIPONY/",
-  "Sounds: " .. PATHS.soundDir,
-  "Schema version: " .. SCHEMA_VERSION,
+-- File paths live behind the last "File locations" row (popup) to keep this list short.
+-- {label, value} pairs so the popup can pixel-align the values in two columns.
+local ABOUT_PATHS = {
+  { "Config:", PATHS.config },
+  { "Widget:", "/WIDGETS/LIPONY/main.lua" },
+  { "Tool:",   "/SCRIPTS/TOOLS/LIPONY.lua" },
+  { "Sounds:", PATHS.soundDir },
 }
 
--- Scrolling info list (same window logic as the Batteries list). The lines have no
--- action, so ENTER or EXIT just returns; the wheel scrolls.
-local function drawAbout()
+-- Built once: identity + firmware (radio only) + URL + schema, then the paths row last.
+local ABOUT_LINES = (function()
+  local lines = {
+    "(c) Mariator-pro   GPL-2.0",
+    "LIPONY  v" .. VERSION,
+  }
+  if getVersion then   -- absent in the host-Lua tests / desktop
+    local ver, radio, _, _, _, osname = getVersion()
+    lines[#lines + 1] = (osname or "EdgeTX") .. " " .. tostring(ver)
+                        .. (radio and (" (" .. radio .. ")") or "")
+  end
+  lines[#lines + 1] = "github.com/Mariator-pro/edgetx-lipo-nanny"
+  lines[#lines + 1] = "Schema version: " .. SCHEMA_VERSION
+  lines[#lines + 1] = "File locations..."   -- ENTER opens the paths popup
+  return lines
+end)()
+
+-- Scrolling info list (same window logic as the Batteries list). Only the last row
+-- ("File locations") acts on ENTER; the others are inert, EXIT returns, wheel scrolls.
+function Screen.drawAbout()
   drawHeader("ABOUT")
-  local n       = #ABOUT_LINES
-  local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
-  local focus   = math.max(1, math.min(S.cursor, n))
-  local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), n - maxRows + 1))
-  if start < 1 then start = 1 end
+  local n          = #ABOUT_LINES
+  local start, last = scrollWindow(S.cursor, n, 1)
   local row = 0
-  for i = start, math.min(n, start + maxRows - 1) do
+  for i = start, last do
     row = row + 1
     lcd.drawText(COL1, bodyY(row), ABOUT_LINES[i], COLOR_THEME_PRIMARY1 + (S.cursor == i and INVERS or 0))
   end
+  drawScrollbar(LCD_W - PAD - 3, bodyY(1), last - start + 1, start, n)
   drawButtonBar({ "Back" }, n + 1, S.cursor)
 end
 
-local function handleAbout(e)
+function Screen.handleAbout(e)
   S.cursor = moveCursor(S.cursor, e, #ABOUT_LINES + 1)   -- scroll the info lines + Back
-  if isEnter(e) or isExit(e) then S.screen = SCREEN.MAIN; S.cursor = 4 end
+  if isEnter(e) then
+    if S.cursor == #ABOUT_LINES then
+      Nav.openInfoRows(ABOUT_PATHS)          -- paths row: pop the aligned file list
+    elseif S.cursor == #ABOUT_LINES + 1 then
+      S.screen = SCREEN.MAIN; S.cursor = 4   -- Back button; inert info rows ignore ENTER
+    end
+  elseif isExit(e) then
+    S.screen = SCREEN.MAIN; S.cursor = 4
+  end
   return 0
 end
 
@@ -826,10 +955,10 @@ end
 -- Screen: Defaults editor
 -- ---------------------------------------------------------------------------
 
--- Top-level rows: Low (1), Critical (2), reset-stats (3), reset-config (4),
--- Back (5), Save (6). ENTER on a warning row dives in; the roller then steps its
--- cells (DEF_SUBS) and ENTER edits/plays the focused one (Packs-style).
-local DEF_ITEMS = 6
+-- Top-level rows: Low (1), Critical (2), haptic on/off (3), haptic strength (4),
+-- reset-stats (5), reset-config (6), Back (7), Save (8). The warning rows dive in to
+-- edit their cells (DEF_SUBS); the haptic rows edit inline.
+local DEF_ITEMS = 8
 local DEF_SUBS  = { "thr", "snd", "test" }
 
 local function defaultsDirty()
@@ -838,6 +967,8 @@ local function defaultsDirty()
       or S.def.crit ~= S.cfg.defaults.crit_pct
       or soundConfigValue(S.sndWarnOpts, S.def.warnSnd) ~= snd.warn
       or soundConfigValue(S.sndCritOpts, S.def.critSnd) ~= snd.crit
+      or S.def.haptic ~= (S.cfg.haptic == true)
+      or S.def.hapticStrength ~= HAPTIC.strengthOf(S.cfg)
 end
 
 local function leaveDefaults()
@@ -847,7 +978,7 @@ end
 
 local function saveDefaults()
   if not (S.def.warn > S.def.crit) then
-    openAlert("Low must be above Critical")
+    Nav.openAlert("Low must be above Critical")
     return
   end
   S.cfg.defaults.warn_pct = S.def.warn
@@ -855,12 +986,14 @@ local function saveDefaults()
   S.cfg.sounds = S.cfg.sounds or {}
   S.cfg.sounds.warn = soundConfigValue(S.sndWarnOpts, S.def.warnSnd)
   S.cfg.sounds.crit = soundConfigValue(S.sndCritOpts, S.def.critSnd)
-  withRetry(function() return saveConfig(S.cfg) end, leaveDefaults)
+  S.cfg.haptic         = S.def.haptic
+  S.cfg.hapticStrength = S.def.hapticStrength
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, leaveDefaults)
 end
 
 local function cancelDefaults()
   if defaultsDirty() then
-    openDialog("Discard changes?", leaveDefaults)
+    Nav.openDialog("Discard changes?", leaveDefaults)
   else
     leaveDefaults()
   end
@@ -877,57 +1010,126 @@ local function defaultsRows()
   }
 end
 
-local function drawDefaults()
+function Screen.drawDefaults()
   drawHeader("SETTINGS")
 
-  -- Column header row (bold, not selectable).
-  local hy = bodyY(1)
-  lcd.drawText(ST_WARN, hy, "Warning",   COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(ST_THR,  hy, "Threshold", COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(ST_SND,  hy, "Sound",     COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(ST_TEST, hy, "Test",      COLOR_THEME_PRIMARY1 + BOLD)
+  local rows    = defaultsRows()
+  local DEF_ROWS = DEF_ITEMS - 2   -- selectable rows; the other 2 cursor slots are Back/Save
 
-  for r, row in ipairs(defaultsRows()) do
-    local y      = bodyY(1 + r)
-    local dived  = S.defDive == r
-    local rowSel = (S.cursor == r) and not dived
-    -- The row label inverts to mark the focused row before diving in; once dived,
-    -- only the active cell inverts (and blinks while being edited).
-    -- Right arrow before the label: the row opens (dive in) to edit its cells.
-    local _, lh = lcd.sizeText("Mg")
-    drawRightArrow(ST_WARN, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
-    lcd.drawText(ST_WARN + ARROW_W + ARROW_GAP, y, row.label,
-                 COLOR_THEME_PRIMARY1 + (rowSel and INVERS or 0))
-    local function cell(x, text, sub, editing)
+  -- Draws item (1..6) at y: warning rows (1-2) dive to edit cells, haptic rows (3-4)
+  -- edit inline, the last two are reset buttons.
+  local function drawItem(item, y)
+    if item <= 2 then
+      local row    = rows[item]
+      local dived  = S.defDive == item
+      local rowSel = (S.cursor == item) and not dived
+      -- Label inverts to mark the focused row; once dived only the active cell inverts
+      -- (and blinks while edited). Right arrow = the row opens to edit its cells.
+      local _, lh = lcd.sizeText("Mg")
+      drawRightArrow(ST.warn, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
+      lcd.drawText(ST.warn + ARROW_W + ARROW_GAP, y, row.label,
+                   COLOR_THEME_PRIMARY1 + (rowSel and INVERS or 0))
+      local function cell(x, text, sub, editing)
+        local f = COLOR_THEME_PRIMARY1
+        if editing then f = f + BLINK + INVERS
+        elseif dived and S.defSub == sub then f = f + INVERS end
+        lcd.drawText(x, y, text, f)
+      end
+      cell(ST.thr, row.thr .. " %", "thr", dived and S.defSub == "thr" and S.defEditing)
+      local sndTextX = drawArrowBefore(ST.snd, y, COLOR_THEME_PRIMARY1)
+      cell(sndTextX, row.sndOpts[row.sndIdx].label, "snd", false)   -- sound uses the picker
+      drawButton(ST.test, y - 2, "Play", dived and S.defSub == "test")
+    elseif item <= 4 then
+      local isFb    = item == 3
+      local field   = isFb and "haptic" or "hapticStrength"
+      local value   = isFb and (S.def.haptic and "On" or "Off")
+                            or (HAPTIC.labels[S.def.hapticStrength] or "Normal")
+      lcd.drawText(ST.warn, y, isFb and "Haptic feedback" or "Haptic strength",
+                   COLOR_THEME_PRIMARY1)
       local f = COLOR_THEME_PRIMARY1
-      if editing then f = f + BLINK + INVERS
-      elseif dived and S.defSub == sub then f = f + INVERS end
-      lcd.drawText(x, y, text, f)
+      if S.defEditing and S.defField == field then f = f + BLINK + INVERS
+      elseif S.cursor == item then f = f + INVERS end
+      lcd.drawText(ST.snd, y, value, f)
+    else
+      drawButton(PAD, y - 2, (item == 5) and "Reset statistics" or "Reset configuration",
+                 S.cursor == item)
     end
-    cell(ST_THR,  row.thr .. " %",               "thr",  dived and S.defSub == "thr" and S.defEditing)
-    local sndTextX = drawArrowBefore(ST_SND, y, COLOR_THEME_PRIMARY1)
-    cell(sndTextX, row.sndOpts[row.sndIdx].label, "snd", false)   -- sound uses the picker
-    drawButton(ST_TEST, y - 2, "Play", dived and S.defSub == "test")
   end
 
-  -- Destructive resets as buttons (Back/Save style), stacked below the table.
-  drawButton(PAD, bodyY(5), "Reset statistics",    S.cursor == 3)
-  drawButton(PAD, bodyY(6), "Reset configuration", S.cursor == 4)
-  drawButtonBar({ "Back", "Save" }, 5, S.cursor)
+  -- Render list: column header, the two warning rows, then an optional one-line
+  -- hint describing the focused threshold, then the haptic + reset rows. The hint
+  -- is dropped (not blanked) when a non-warning row is focused, so the list never
+  -- scrolls past an empty gap.
+  local list = {
+    function(y)
+      lcd.drawText(ST.warn, y, "Warning",   COLOR_THEME_PRIMARY1 + BOLD)
+      lcd.drawText(ST.thr,  y, "Threshold", COLOR_THEME_PRIMARY1 + BOLD)
+      lcd.drawText(ST.snd,  y, "Sound",     COLOR_THEME_PRIMARY1 + BOLD)
+      lcd.drawText(ST.test, y, "Test",      COLOR_THEME_PRIMARY1 + BOLD)
+    end,
+    function(y) drawItem(1, y) end,
+    function(y) drawItem(2, y) end,
+  }
+  if S.cursor == 1 or S.cursor == 2 then
+    list[#list + 1] = function(y)
+      local hint = (S.cursor == 1)
+        and ("Low warning when remaining capacity drops below " .. S.def.warn .. " %")
+        or  ("Critical alert when remaining capacity drops below " .. S.def.crit .. " %")
+      lcd.drawText(drawInfoBadge(COL1, y), y, hint, COLOR_THEME_PRIMARY1 + SMLSIZE)
+    end
+  end
+  for item = 3, DEF_ROWS do
+    -- Strength (4) only matters once feedback is on, so it is hidden (and skipped
+    -- in navigation) while haptic is off.
+    if not (item == 4 and not S.def.haptic) then
+      list[#list + 1] = function(y) drawItem(item, y) end
+    end
+  end
+
+  -- Viewport from the first body row to the pinned Back/Save bar; the focused row
+  -- (cursor + 1, since the header is list[1]) stays centred and clamped into view.
+  local top0    = bodyY(1)
+  local nRows   = #list
+  local rowsFit = math.max(1, math.floor((barTopY() - top0) / LINE))
+  local focus   = S.cursor + 1
+  if not S.def.haptic and S.cursor >= 4 then focus = focus - 1 end   -- strength row hidden
+  focus = (S.cursor <= DEF_ROWS) and focus or nRows
+  local start   = math.max(1, math.min(focus - math.floor(rowsFit / 2), nRows - rowsFit + 1))
+  for i = 0, rowsFit - 1 do
+    local idx = start + i
+    if idx <= nRows then list[idx](top0 + i * LINE) end
+  end
+
+  if nRows > rowsFit then drawScrollbar(LCD_W - PAD - 3, top0, rowsFit, start, nRows) end
+  drawButtonBar({ "Back", "Save" }, 7, S.cursor)
 end
 
-local function handleDefaults(e)
+function Screen.handleDefaults(e)
   if S.defEditing then
     local field = S.defField
-    if isNext(e) and S.def[field] < 99 then
-      S.def[field] = S.def[field] + 1
-    elseif isPrev(e) and S.def[field] > 1 then
-      S.def[field] = S.def[field] - 1
-    elseif isEnter(e) then
-      S.defEditing = false
-    elseif isExit(e) then
-      S.def[field]  = S.defOrig   -- cancel edit
-      S.defEditing  = false
+    if field == "haptic" then
+      if isNext(e) or isPrev(e) then
+        S.def.haptic = not S.def.haptic           -- both directions just toggle
+      elseif isEnter(e) then
+        S.defEditing = false
+      elseif isExit(e) then
+        S.def.haptic = S.defOrig                   -- cancel edit
+        S.defEditing = false
+      end
+    else
+      -- Numeric fields, clamped without wrap: warn/crit (1..99), hapticStrength (1..3).
+      local hi = (field == "hapticStrength") and HAPTIC.max or 99
+      local lo = (field == "hapticStrength") and HAPTIC.min or 1
+      if isNext(e) and S.def[field] < hi then
+        S.def[field] = S.def[field] + 1
+      elseif isPrev(e) and S.def[field] > lo then
+        S.def[field] = S.def[field] - 1
+      elseif isEnter(e) then
+        S.defEditing = false
+      elseif isExit(e) then
+        S.def[field]  = S.defOrig   -- cancel edit
+        S.defEditing  = false
+      end
     end
     return 0
   end
@@ -952,11 +1154,12 @@ local function handleDefaults(e)
         local opts   = isWarn and S.sndWarnOpts or S.sndCritOpts
         local labels = {}
         for _, o in ipairs(opts) do labels[#labels + 1] = o.label end
-        openPicker(isWarn and "Low sound" or "Critical sound", labels, S.def[field],
+        Nav.openPicker(isWarn and "Low sound" or "Critical sound", labels, S.def[field],
                    function(sel) S.def[field] = sel end)
-      else   -- test: preview the row's current sound
+      else   -- test: preview the row's current sound + matching vibration
         playFile(isWarn and S.sndWarnOpts[S.def.warnSnd].path
                         or  S.sndCritOpts[S.def.critSnd].path)
+        HAPTIC.test(S.def.haptic, S.def.hapticStrength, isWarn and 1 or 2)
       end
     elseif isExit(e) then
       S.defDive = nil
@@ -966,18 +1169,24 @@ local function handleDefaults(e)
 
   -- Top-level row navigation.
   S.cursor = moveCursor(S.cursor, e, DEF_ITEMS)
+  -- Skip the hidden Haptic-strength row (4) when haptic feedback is off.
+  if S.cursor == 4 and not S.def.haptic then S.cursor = isNext(e) and 5 or 3 end
   if isEnter(e) then
     if S.cursor == 1 or S.cursor == 2 then
       S.defDive, S.defSub = S.cursor, "thr"   -- dive into the Low / Critical row
     elseif S.cursor == 3 then
-      openDialog("Reset all statistics? Cycle counts and archive are lost.",
-                 function() resetStats(function() openAlert("Statistics reset") end) end)
+      S.defField, S.defOrig, S.defEditing = "haptic", S.def.haptic, true
     elseif S.cursor == 4 then
-      openDialog("Reset configuration? All batteries and models are erased.",
-                 function() resetConfig(leaveDefaults) end)
+      S.defField, S.defOrig, S.defEditing = "hapticStrength", S.def.hapticStrength, true
     elseif S.cursor == 5 then
-      cancelDefaults()   -- Back (discard with confirm if dirty)
+      Nav.openDialog("Reset all statistics? Cycle counts and archive are lost.",
+                 function() resetStats(function() Nav.openAlert("Statistics reset") end) end)
     elseif S.cursor == 6 then
+      Nav.openDialog("Reset configuration? All batteries and models are erased.",
+                 function() resetConfig(leaveDefaults) end)
+    elseif S.cursor == 7 then
+      cancelDefaults()   -- Back (discard with confirm if dirty)
+    elseif S.cursor == 8 then
       saveDefaults()
     end
   elseif isExit(e) then
@@ -1029,8 +1238,6 @@ end
 -- Screen: Batteries list
 -- ---------------------------------------------------------------------------
 
-local enterProfile      -- forward declaration (defined below)
-local enterPacks        -- forward declaration (Packs page, defined below)
 local modelDisplayName  -- forward declaration (Models section); used by the
                         -- parallel-binding messages, which are built earlier
 
@@ -1038,7 +1245,7 @@ local function batteryListItems()
   return sortedBatteries(S.cfg)
 end
 
-local function drawBatteries()
+function Screen.drawBatteries()
   drawHeader("BATTERIES")
   local items = batteryListItems()
   if #items == 0 then
@@ -1046,31 +1253,29 @@ local function drawBatteries()
   else
     -- Scrolling window between header and button bar (the "[+] Add new" cursor
     -- index, #items+1, keeps the list scrolled to the bottom).
-    local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
-    local focus   = math.max(1, math.min(S.cursor, #items))
-    local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #items - maxRows + 1))
-    if start < 1 then start = 1 end
+    local start, last = scrollWindow(S.cursor, #items, 1)
     local row = 0
-    for i = start, math.min(#items, start + maxRows - 1) do
+    for i = start, last do
       row = row + 1
       drawNavRow(row, items[i].name, S.cursor == i, { folder = true })
     end
+    drawScrollbar(LCD_W - PAD - 3, bodyY(1), last - start + 1, start, #items)
   end
   drawButtonBar({ "Back", "[+] Add new" }, #items + 1, S.cursor)
 end
 
-local function handleBatteries(e)
+function Screen.handleBatteries(e)
   local items = batteryListItems()
   local count = #items + 2            -- profiles + "Back" + "[+] Add new"
   S.cursor = moveCursor(S.cursor, e, count)
   if isEnter(e) then
     if S.cursor <= #items then
-      enterProfile(items[S.cursor])
+      Nav.enterProfile(items[S.cursor])
     elseif S.cursor == #items + 1 then
       S.screen = SCREEN.MAIN
       S.cursor = 1
     else
-      enterProfile(nil)
+      Nav.enterProfile(nil)
     end
   elseif isExit(e) then
     S.screen = SCREEN.MAIN
@@ -1111,12 +1316,15 @@ local function newProfile()
   return p
 end
 
--- Deep-copies the instance objects { id, label, wear, cycles } so the editor can
--- mutate its working copy without touching the stored profile until save.
+-- Deep-copies the instance objects so the editor can mutate its working copy without
+-- touching the stored profile until save. The read-only statistics (totalMah, lastUsed,
+-- minVCell) and the manual buyDate ride along so a profile save doesn't drop them.
 local function copyInstances(src)
   local out = {}
   for i, p in ipairs(src or {}) do
-    out[i] = { id = p.id, label = p.label, wear = p.wear or 0, cycles = p.cycles or 0 }
+    out[i] = { id = p.id, label = p.label, wear = p.wear or 0, cycles = p.cycles or 0,
+               totalMah = p.totalMah, lastUsed = p.lastUsed, minVCell = p.minVCell,
+               buyDate = p.buyDate }
   end
   return out
 end
@@ -1134,7 +1342,8 @@ local function instancesEqual(a, b)
   for i = 1, #a do
     if a[i].id ~= b[i].id or a[i].label ~= b[i].label
        or (a[i].wear or 0) ~= (b[i].wear or 0)
-       or (a[i].cycles or 0) ~= (b[i].cycles or 0) then
+       or (a[i].cycles or 0) ~= (b[i].cycles or 0)
+       or a[i].buyDate ~= b[i].buyDate then
       return false
     end
   end
@@ -1148,7 +1357,7 @@ local function profilesEqual(a, b)
      and instancesEqual(a.instances, b.instances)
 end
 
-enterProfile = function(existing)
+function Nav.enterProfile(existing)
   if existing then
     S.prof      = copyProfile(existing)
     S.profOrig  = copyProfile(existing)
@@ -1207,14 +1416,16 @@ local function buildProfileLines()
   field(3, "Chemistry", p.chemistry)
   field(4, "Capacity", p.capacityMah .. " mAh")
   field(5, "Cells", p.cells .. "S")
-  -- Opens the Packs page (per-pack cycles, wear, add/archive).
+  -- Opens the Packs page (per-pack cycles, wear, buy date, add/archive).
   folder(6, "Packs", tostring(#p.instances))
-  field(7, "Low", p.warn_pct and (p.warn_pct .. " %")
+  -- Read-only per-pack Statistics page, grouped right under Packs.
+  folder(7, "Statistics", nil)
+  field(8, "Low", p.warn_pct and (p.warn_pct .. " %")
         or (S.cfg.defaults.warn_pct .. " % (default)"))
-  field(8, "Critical", p.crit_pct and (p.crit_pct .. " %")
+  field(9, "Critical", p.crit_pct and (p.crit_pct .. " %")
         or (S.cfg.defaults.crit_pct .. " % (default)"))
-  -- Items 9/10/(11) are the Save/Cancel/Delete buttons; they are not field rows —
-  -- drawProfile renders them in the pinned bottom button bar.
+  -- Items 10/11/(12) are the Save/Cancel/Delete buttons; they are not field rows —
+  -- Screen.drawProfile renders them in the pinned bottom button bar.
   return lines
 end
 
@@ -1371,7 +1582,7 @@ local function drawTextEditor()
   end
 end
 
-local function drawProfile()
+function Screen.drawProfile()
   if S.profEditing == 1 or S.profEditing == 2 then
     drawTextEditor()
     return
@@ -1384,18 +1595,17 @@ local function drawProfile()
     if ln.item == S.profCursor then focus = i break end
   end
   -- Reserve the bottom line for the pinned button bar (+separator).
-  local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
-  local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #lines - maxRows + 1))
-  if start < 1 then start = 1 end
+  local start, last = scrollWindow(focus, #lines, 1)
   local editY, editVal
-  for i = start, math.min(#lines, start + maxRows - 1) do
+  for i = start, last do
     local ln  = lines[i]
     local row = i - start + 1
     drawFieldRow(row, ln.label, ln.value,
                  { selected = ln.item == S.profCursor, editing = S.profEditing == ln.item, folder = ln.folder })
     if ln.item == S.profEditing then editY, editVal = bodyY(row), ln.value end
   end
-  drawButtonBar(profileActions(), 9, S.profCursor)
+  drawScrollbar(LCD_W - PAD - 3, bodyY(1), last - start + 1, start, #lines)
+  drawButtonBar(profileActions(), 10, S.profCursor)
   -- Key-chip hint for the capacity field (MDL toggles the step size).
   if editY and S.profEditing == 4 then
     local valueRight = editVal and (COL2 + lcd.sizeText(editVal))
@@ -1436,7 +1646,7 @@ local function defaultChar(pos) return pos == 1 and "A" or "a" end
 local function startTextEdit(field)
   S.profEditing  = field
   S.textBuf      = (field == 2) and S.prof.manufacturer or S.prof.name
-  S.textMax      = (field == 2) and MFR_MAX or NAME_MAX
+  S.textMax      = (field == 2) and TEXT_MAX.mfr or TEXT_MAX.name
   S.textPos      = 1
   S.textCharMode = false
   S.textSnapshot = nil
@@ -1528,9 +1738,9 @@ local function adjustNumber(e)
     if isNext(e) then p.cells = math.min(30, p.cells + 1)
     elseif isPrev(e) then p.cells = math.max(1, p.cells - 1) end
     refreshAutoName()
-  elseif item == 7 or item == 8 then                 -- warn/crit override (nil = follow default)
-    local key = (item == 7) and "warn_pct" or "crit_pct"
-    local def = (item == 7) and S.cfg.defaults.warn_pct or S.cfg.defaults.crit_pct
+  elseif item == 8 or item == 9 then                 -- warn/crit override (nil = follow default)
+    local key = (item == 8) and "warn_pct" or "crit_pct"
+    local def = (item == 8) and S.cfg.defaults.warn_pct or S.cfg.defaults.crit_pct
     local cur = p[key] or def         -- nil sits on the default value
     if isNext(e) then cur = math.min(99, cur + 1)
     elseif isPrev(e) then cur = math.max(1, cur - 1) end
@@ -1557,21 +1767,24 @@ local function parallelModelsUsing(cfg, id)
 end
 
 -- Retires one instance into config.archive, keyed by its stable pack id, keeping
--- the battery's name and last cycle count as a human-readable reference.
+-- the battery's name, cycle count and statistics as a human-readable reference.
 local function archiveInstance(profileName, instance)
   if not instance or not instance.id then return end
-  S.cfg.archive[instance.id] = { name = profileName, cycles = instance.cycles or 0 }
+  S.cfg.archive[instance.id] = { name = profileName, cycles = instance.cycles or 0,
+                                 totalMah = instance.totalMah or 0,
+                                 lastUsed = instance.lastUsed, minVCell = instance.minVCell,
+                                 buyDate = instance.buyDate }
 end
 
 -- --- save ---
 
 local function validateProfile()
   if S.prof.manufacturer == "" then
-    openAlert("Manufacturer required")
+    Nav.openAlert("Manufacturer required")
     return false
   end
   if S.prof.warn_pct and S.prof.crit_pct and not (S.prof.warn_pct > S.prof.crit_pct) then
-    openAlert("Low must be above Critical")
+    Nav.openAlert("Low must be above Critical")
     return false
   end
   return true
@@ -1616,7 +1829,7 @@ local function saveProfile()
       if b.id == S.prof.id then S.cfg.batteries[i] = np; break end
     end
   end
-  withRetry(function() return saveConfig(S.cfg) end, gotoBatteries)
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, gotoBatteries)
 end
 
 -- --- delete (archives the profile and all its packs) ---
@@ -1631,16 +1844,16 @@ local function doDeleteProfile()
       break
     end
   end
-  withRetry(function() return saveConfig(S.cfg) end, gotoBatteries)
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, gotoBatteries)
 end
 
 local function deleteProfile()
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 then
-    openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. " — unassign first")
+    Nav.openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. " — unassign first")
     return
   end
-  openDialog("Delete profile and archive all " .. #S.profOrig.instances .. " packs?",
+  Nav.openDialog("Delete profile and archive all " .. #S.profOrig.instances .. " packs?",
              doDeleteProfile)
 end
 
@@ -1648,7 +1861,7 @@ local function cancelProfile()
   if profilesEqual(S.prof, S.profOrig) then
     leaveProfile()
   else
-    openDialog("Discard changes?", leaveProfile)
+    Nav.openDialog("Discard changes?", leaveProfile)
   end
 end
 
@@ -1660,12 +1873,12 @@ local function resetName()
   S.profCursor = 1
 end
 
--- 8 field items, then the bottom-bar buttons (Back/Save + maybe Delete/Reset name).
+-- 9 field items, then the bottom-bar buttons (Back/Save + maybe Delete/Reset name).
 local function profileItemCount()
-  return 8 + #profileActions()
+  return 9 + #profileActions()
 end
 
-local function handleProfile(e)
+function Screen.handleProfile(e)
   if S.profEditing == 1 or S.profEditing == 2 then
     handleTextEdit(e)
     return 0
@@ -1679,12 +1892,14 @@ local function handleProfile(e)
     local c = S.profCursor
     if c == 1 or c == 2 then
       startTextEdit(c)
-    elseif c == 3 or c == 4 or c == 5 or c == 7 or c == 8 then
+    elseif c == 3 or c == 4 or c == 5 or c == 8 or c == 9 then
       S.profEditing = c
     elseif c == 6 then
-      enterPacks()
-    elseif c >= 9 then
-      local act = profileActions()[c - 8]
+      Nav.enterPacks()
+    elseif c == 7 then
+      Nav.enterStats()
+    elseif c >= 10 then
+      local act = profileActions()[c - 9]
       if act == "Save" then saveProfile()
       elseif act == "Back" then cancelProfile()
       elseif act == "Delete" then deleteProfile()
@@ -1800,9 +2015,8 @@ end
 -- Screen: Models list
 -- ---------------------------------------------------------------------------
 
-local enterModel   -- forward declaration
 
-local function drawModels()
+function Screen.drawModels()
   drawHeader("MODELS")
   local active = modelFilename()
   local keys   = modelKeys(S.cfg, active)
@@ -1810,17 +2024,15 @@ local function drawModels()
     lcd.drawText(COL1, bodyY(1), "No models configured.", COLOR_THEME_PRIMARY1)
   else
     -- Scrolling window between header and button bar (same as the Batteries list).
-    local maxRows = math.max(1, math.floor((barTopY() - bodyY(1)) / LINE))
-    local focus   = math.max(1, math.min(S.cursor, #keys))
-    local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), #keys - maxRows + 1))
-    if start < 1 then start = 1 end
+    local start, last = scrollWindow(S.cursor, #keys, 1)
     local row = 0
-    for i = start, math.min(#keys, start + maxRows - 1) do
+    for i = start, last do
       row = row + 1
       local k = keys[i]
       drawNavRow(row, modelDisplayName(k) .. (k == active and "   [active]" or ""),
                  S.cursor == i, { folder = true })
     end
+    drawScrollbar(LCD_W - PAD - 3, bodyY(1), last - start + 1, start, #keys)
   end
   -- Bottom bar: always "Back" to the main menu first, then optionally
   -- "[+] Add current model" (when the active model is not configured yet).
@@ -1839,17 +2051,17 @@ local function modelListCount()
   return n, keys, addCurrent
 end
 
-local function handleModels(e)
+function Screen.handleModels(e)
   local count, keys, addCurrent = modelListCount()
   S.cursor = moveCursor(S.cursor, e, math.max(1, count))
   if isEnter(e) then
     if S.cursor <= #keys then
-      enterModel(keys[S.cursor])
+      Nav.enterModel(keys[S.cursor])
     elseif S.cursor == #keys + 1 then
       S.screen = SCREEN.MAIN       -- Back
       S.cursor = 2
     elseif addCurrent and S.cursor == #keys + 2 then
-      enterModel(nil)              -- add current model
+      Nav.enterModel(nil)              -- add current model
     end
   elseif isExit(e) then
     S.screen = SCREEN.MAIN
@@ -1862,7 +2074,7 @@ end
 -- Screen: Model editor
 -- ---------------------------------------------------------------------------
 
-enterModel = function(key)
+function Nav.enterModel(key)
   local active = modelFilename()
   if key then
     local m = S.cfg.models[key]
@@ -1899,7 +2111,7 @@ local function modelDirty()
       or not sensorsEqual(S.model.sensors, S.modelOrig.sensors)
 end
 
-local function drawModel()
+function Screen.drawModel()
   drawHeader(S.modelIsNew and ("ADD MODEL  " .. modelDisplayName(S.model.filename))
              or ("EDIT MODEL  " .. modelDisplayName(S.model.filename)))
   drawFieldRow(1, "Cells", S.model.cells .. "S", { selected = S.modelCursor == 1, editing = S.modelEditing })
@@ -1932,13 +2144,13 @@ local function finishModelSave()
     end
   end
   S.cfg.models[S.model.filename] = entry
-  withRetry(function() return saveConfig(S.cfg) end, leaveModel)
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, leaveModel)
 end
 
 -- Parallel invariant check, then write.
 local function proceedModelSave()
   if S.model.parallel and not parallelInvariantOk(S.cfg, S.model) then
-    openAlert("Parallel mode needs a profile with 2+ packs")
+    Nav.openAlert("Parallel mode needs a profile with 2+ packs")
     return
   end
   finishModelSave()
@@ -1952,7 +2164,7 @@ local function saveModel()
     if p and p.cells ~= S.model.cells then invalid[#invalid + 1] = id end
   end
   if #invalid > 0 then
-    openDialog("Changing cells unassigns " .. #invalid .. " batteries. Continue?", function()
+    Nav.openDialog("Changing cells unassigns " .. #invalid .. " batteries. Continue?", function()
       local kept = {}
       for _, id in ipairs(S.model.batteryIds) do
         local p = profileById(S.cfg, id)
@@ -1967,24 +2179,22 @@ local function saveModel()
 end
 
 local function deleteModel()
-  openDialog("Delete model config for " .. modelDisplayName(S.model.filename) .. "?", function()
+  Nav.openDialog("Delete model config for " .. modelDisplayName(S.model.filename) .. "?", function()
     S.cfg.models[S.model.filename] = nil
-    withRetry(function() return saveConfig(S.cfg) end, leaveModel)
+    withRetry(function() return Cfg.saveConfig(S.cfg) end, leaveModel)
   end)
 end
 
 local function cancelModel()
   if modelDirty() then
-    openDialog("Discard changes?", leaveModel)
+    Nav.openDialog("Discard changes?", leaveModel)
   else
     leaveModel()
   end
 end
 
-local openAssign    -- forward declaration
-local openSensors   -- forward declaration
 
-local function handleModel(e)
+function Screen.handleModel(e)
   if S.modelEditing then            -- editing Cells (number)
     if isExit(e) then
       S.modelEditing = false
@@ -2006,9 +2216,9 @@ local function handleModel(e)
     elseif c == 2 then
       S.model.parallel = not S.model.parallel
     elseif c == 3 then
-      openAssign()
+      Nav.openAssign()
     elseif c == 4 then
-      openSensors()
+      Nav.openSensors()
     elseif c == 5 then
       cancelModel()      -- Back (discard with confirm if dirty)
     elseif c == 6 then
@@ -2026,7 +2236,7 @@ end
 -- Screen: battery-assignment submenu
 -- ---------------------------------------------------------------------------
 
-openAssign = function()
+function Nav.openAssign()
   -- Profiles of the model's cell count, checked ones first then alphabetical.
   local matching = {}
   for _, b in ipairs(S.cfg.batteries) do
@@ -2062,35 +2272,28 @@ local function applyAssign()
   S.modelCursor = 3
 end
 
-local function drawAssign()
-  drawHeader(S.model.parallel and ("SELECT " .. S.model.cells .. "S PARALLEL PROFILE")
+function Screen.drawAssign()
+  drawHeader(S.model.parallel and ("SELECT " .. S.model.cells .. "S PARALLEL PROFILES")
              or ("SELECT " .. S.model.cells .. "S BATTERIES"))
   if #S.assignItems == 0 then
     lcd.drawText(COL1, bodyY(1), "No matching profiles.", COLOR_THEME_PRIMARY1)
   end
   for i, it in ipairs(S.assignItems) do
-    local box
-    if S.model.parallel then box = it.checked and "(o) " or "( ) "
-    else box = it.checked and "[x] " or "[ ] " end
+    local box = it.checked and "[x] " or "[ ] "
     -- Non-selectable profiles (parallel needs 2+ packs) are simply dimmed.
     drawNavRow(i, box .. it.name, S.assignCursor == i, { disabled = not it.selectable })
   end
   drawButtonBar({ "Back" }, #S.assignItems + 1, S.assignCursor)
 end
 
-local function handleAssign(e)
+function Screen.handleAssign(e)
   local count = #S.assignItems + 1
   S.assignCursor = moveCursor(S.assignCursor, e, count)
   if isEnter(e) then
     if S.assignCursor <= #S.assignItems then
       local it = S.assignItems[S.assignCursor]
       if it.selectable then
-        if S.model.parallel then
-          for _, o in ipairs(S.assignItems) do o.checked = false end
-          it.checked = true
-        else
-          it.checked = not it.checked
-        end
+        it.checked = not it.checked
       end
     else
       applyAssign()
@@ -2109,7 +2312,7 @@ end
 -- read-only. S.sensorOpts is { false } .. <sensor names>, where the false sentinel
 -- means "use the CRSF default" (stored as nil).
 
-openSensors = function()
+function Nav.openSensors()
   S.sensorList = S.modelIsActive and modelSensorNames() or {}
   S.sensorOpts = { false }
   for _, n in ipairs(S.sensorList) do S.sensorOpts[#S.sensorOpts + 1] = n end
@@ -2147,7 +2350,7 @@ local function leaveSensors()
   S.modelCursor = 4
 end
 
-local function drawSensors()
+function Screen.drawSensors()
   drawHeader("SENSORS  " .. modelDisplayName(S.model.filename))
   -- The per-field description uses a small font, pinned above the button bar.
   local _, smH  = lcd.sizeText("Mg", SMLSIZE)
@@ -2171,7 +2374,10 @@ local function drawSensors()
     local desc = SENSOR_FIELDS[math.min(S.sensorCursor, #SENSOR_FIELDS)].desc
     local dy   = footTop - #desc * smPitch - 4
     for j, line in ipairs(desc) do
-      lcd.drawText(COL1, dy + (j - 1) * smPitch, line, COLOR_THEME_PRIMARY1 + SMLSIZE)
+      local ly = dy + (j - 1) * smPitch
+      -- Info badge before the first line marks the block as a hint.
+      local tx = (j == 1) and drawInfoBadge(COL1, ly) or COL1
+      lcd.drawText(tx, ly, line, COLOR_THEME_PRIMARY1 + SMLSIZE)
     end
   else
     lcd.drawText(COL1, footTop - smPitch - 4, "Activate this model to edit sensors.", COLOR_THEME_PRIMARY1 + SMLSIZE)
@@ -2183,20 +2389,20 @@ end
 
 -- Picker for field index `c`: option 1 is the CRSF default (stored as nil), the
 -- rest are the model's live sensor names.
-local function openSensorPicker(c)
+function Nav.openSensorPicker(c)
   local key    = SENSOR_FIELDS[c].key
   local labels = { DEFAULT_SENSORS[key] .. " (default)" }
   for i = 2, #S.sensorOpts do labels[i] = S.sensorOpts[i] end
-  openPicker(SENSOR_FIELDS[c].label .. " sensor", labels, sensorOptIndex(S.model.sensors[key]),
+  Nav.openPicker(SENSOR_FIELDS[c].label .. " sensor", labels, sensorOptIndex(S.model.sensors[key]),
              function(idx) S.model.sensors[key] = (idx > 1) and S.sensorOpts[idx] or nil end)
 end
 
-local function handleSensors(e)
+function Screen.handleSensors(e)
   S.sensorCursor = moveCursor(S.sensorCursor, e, sensorItemCount())
   if isEnter(e) then
     local c = S.sensorCursor
     if c <= 4 then
-      if S.modelIsActive then openSensorPicker(c) end
+      if S.modelIsActive then Nav.openSensorPicker(c) end
     elseif c == 5 then
       leaveSensors()                         -- Back
     elseif sensorsResetShown() and c == 6 then
@@ -2224,38 +2430,55 @@ local function packArchiveLocked()
 end
 
 -- Editable cells of a dived-in pack row, in roller order.
-local PACK_SUBS = { "cycles", "wear", "archive" }
+local PACK_SUBS = { "cycles", "wear", "buydate", "archive" }
 
-enterPacks = function()
+-- Optional purchase date ("YYYY-MM" string, absent = unset). Edited as a month count so
+-- the wheel rolls month->year. One table to spare top-level locals (Lua 200-local cap).
+local Buy = {
+  MIN = 2010 * 12,            -- Jan 2010 (months since year 0)
+  MAX = 2099 * 12 + 11,       -- Dec 2099
+  toMonths = function(s)
+    local y, m = string.match(s or "", "(%d+)-(%d+)")
+    y, m = tonumber(y), tonumber(m)
+    return (y and m) and (y * 12 + (m - 1)) or nil
+  end,
+  fromMonths = function(n) return string.format("%04d-%02d", math.floor(n / 12), n % 12 + 1) end,
+  -- Today's "YYYY-MM" to seed a fresh edit (getDateTime is absent in the host tests).
+  today = function()
+    local dt = getDateTime and getDateTime()
+    return (dt and dt.year) and string.format("%04d-%02d", dt.year, dt.mon) or "2024-01"
+  end,
+}
+
+function Nav.enterPacks()
   S.packsCursor  = 1
   S.packDive     = nil        -- active row (dived in) or nil
-  S.packSub      = "cycles"   -- "cycles" | "wear" | "archive" while dived
+  S.packSub      = "cycles"   -- "cycles" | "wear" | "buydate" | "archive" while dived
   S.packEditCyc  = false
   S.packEditWear = false
+  S.packEditBuy  = false
   S.screen       = SCREEN.PACKS
 end
 
-local function drawPacks()
+function Screen.drawPacks()
   drawHeader("PACKS — " .. S.prof.name)
   local packs = S.prof.instances
 
   -- Column header row (bold, not selectable).
   local hy = bodyY(1)
-  lcd.drawText(PK_ID,   hy, "ID",     COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(PK_CYC,  hy, "Cycles", COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(PK_WEAR, hy, "Wear",   COLOR_THEME_PRIMARY1 + BOLD)
-  lcd.drawText(PK_ACT,  hy, "Remove", COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK.id,   hy, "ID",     COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK.cyc,  hy, "Cycles", COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK.wear, hy, "Wear",   COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK.buy,  hy, "Bought", COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(PK.act,  hy, "Delete", COLOR_THEME_PRIMARY1 + BOLD)
 
   -- Scrolling window of pack rows between the header and the pinned button bar,
   -- so many packs never overrun the bar. The selected row is kept in view; when
   -- the cursor is on Add/Done it stays scrolled to the bottom packs.
-  local n       = #packs
-  local maxRows = math.max(1, math.floor((barTopY() - bodyY(2)) / LINE))
-  local focus   = math.max(1, math.min(S.packsCursor, n))
-  local start   = math.max(1, math.min(focus - math.floor(maxRows / 2), n - maxRows + 1))
-  if start < 1 then start = 1 end
+  local n          = #packs
+  local start, last = scrollWindow(S.packsCursor, n, 2)
   local dispRow = 1                              -- 1 = header row
-  for i = start, math.min(n, start + maxRows - 1) do
+  for i = start, last do
     local p      = packs[i]
     dispRow      = dispRow + 1
     local y      = bodyY(dispRow)
@@ -2273,20 +2496,23 @@ local function drawPacks()
     local cyc        = tostring(p.cycles or 0)
     local cycActive  = dived and S.packSub == "cycles"
     local wearActive = dived and S.packSub == "wear"
+    local buyActive  = dived and S.packSub == "buydate"
     local actActive  = dived and S.packSub == "archive"
     -- Right arrow before the ID: the row opens (dive in) to edit its cells.
     local _, lh = lcd.sizeText("Mg")
-    drawRightArrow(PK_ID, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
-    cell(PK_ID + ARROW_W + ARROW_GAP, "#" .. p.label, rowSel, false)
-    cell(PK_CYC,  cyc,            cycActive, cycActive and S.packEditCyc)
-    cell(PK_WEAR, p.wear .. " %", wearActive, wearActive and S.packEditWear)
-    drawButton(PK_ACT, y - 2, "Remove", actActive)   -- Back/Save-style button
+    drawRightArrow(PK.id, y + math.floor((lh - ARROW_W) / 2), COLOR_THEME_PRIMARY1)
+    cell(PK.id + ARROW_W + ARROW_GAP, "#" .. p.label, rowSel, false)
+    cell(PK.cyc,  cyc,                cycActive,  cycActive and S.packEditCyc)
+    cell(PK.wear, p.wear .. " %",     wearActive, wearActive and S.packEditWear)
+    cell(PK.buy,  p.buyDate or "—",   buyActive,  buyActive and S.packEditBuy)
+    drawButton(PK.act, y - 2, "X", actActive)   -- compact delete box (header says "Delete")
   end
 
+  drawScrollbar(LCD_W - PAD - 3, bodyY(2), last - start + 1, start, n)
   drawButtonBar({ "Back", "[+] Add pack" }, #packs + 1, S.packsCursor)
 end
 
-local function handlePacks(e)
+function Screen.handlePacks(e)
   local packs = S.prof.instances
 
   -- Editing the cycle count of the dived row (saved with the config on profile save).
@@ -2307,7 +2533,18 @@ local function handlePacks(e)
     return 0
   end
 
-  -- Dived into a row: roller moves Cycles→Wear→Remove, ENTER acts, EXIT leaves.
+  -- Editing the purchase date of the dived row: one wheel step = one month, rolling
+  -- into the year. Seeded to the current month on entry, so it is always set here.
+  if S.packEditBuy then
+    local p   = packs[S.packDive]
+    local cur = Buy.toMonths(p.buyDate) or Buy.MIN
+    if isNext(e) then p.buyDate = Buy.fromMonths(math.min(Buy.MAX, cur + 1))
+    elseif isPrev(e) then p.buyDate = Buy.fromMonths(math.max(Buy.MIN, cur - 1))
+    elseif isEnter(e) or isExit(e) then S.packEditBuy = false end
+    return 0
+  end
+
+  -- Dived into a row: roller moves Cycles→Wear→Bought→Remove, ENTER acts, EXIT leaves.
   if S.packDive then
     if isNext(e) or isPrev(e) then
       local idx = 1
@@ -2320,10 +2557,14 @@ local function handlePacks(e)
         S.packEditCyc = true
       elseif S.packSub == "wear" then
         S.packEditWear = true
+      elseif S.packSub == "buydate" then
+        local p = packs[S.packDive]
+        if not p.buyDate then p.buyDate = Buy.today() end   -- seed so it shows at once
+        S.packEditBuy = true
       else
         local reason = packArchiveLocked()
         if reason then
-          openAlert(reason)
+          Nav.openAlert(reason)
         else
           table.remove(packs, S.packDive)   -- archived for real on profile save
           S.packDive = nil
@@ -2346,7 +2587,7 @@ local function handlePacks(e)
       S.screen = SCREEN.PROFILE
     else                                      -- [+] Add pack
       if #packs >= 20 then
-        openAlert("Max 20 packs")
+        Nav.openAlert("Max 20 packs")
       else
         packs[#packs + 1] = { id = nil, label = nextLabel(packs), wear = 0, cycles = 0 }
         sortByLabel(packs)                   -- keep #1,#2,#3 order in the table
@@ -2359,11 +2600,64 @@ local function handlePacks(e)
 end
 
 -- ---------------------------------------------------------------------------
+-- Screen: Statistics (read-only per-pack flight history)
+-- ---------------------------------------------------------------------------
+
+function Nav.enterStats()
+  S.statsCursor = 1
+  S.screen      = SCREEN.STATS
+end
+
+function Screen.drawStats()
+  drawHeader("STATISTICS — " .. S.prof.name)
+  local packs = S.prof.instances
+
+  -- Column header row (bold, not selectable), same default font as the Packs table.
+  local hy = bodyY(1)
+  lcd.drawText(SX.id,   hy, "ID",        COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(SX.cyc,  hy, "Cycles",    COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(SX.mah,  hy, "Life mAh",  COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(SX.vmin, hy, "Vmin",      COLOR_THEME_PRIMARY1 + BOLD)
+  lcd.drawText(SX.last, hy, "Last used", COLOR_THEME_PRIMARY1 + BOLD)
+
+  -- Scrolling window of pack rows between the header and the pinned button bar.
+  local n           = #packs
+  local start, last = scrollWindow(S.statsCursor, n, 2)
+  local dispRow = 1                              -- 1 = header row
+  for i = start, last do
+    local p   = packs[i]
+    dispRow   = dispRow + 1
+    local y   = bodyY(dispRow)
+    -- Read-only page: only the ID cell inverts to mark the current row (like Packs).
+    local idF = COLOR_THEME_PRIMARY1 + (S.statsCursor == i and INVERS or 0)
+    lcd.drawText(SX.id,   y, "#" .. p.label,            idF)
+    lcd.drawText(SX.cyc,  y, tostring(p.cycles or 0),   COLOR_THEME_PRIMARY1)
+    lcd.drawText(SX.mah,  y, tostring(p.totalMah or 0), COLOR_THEME_PRIMARY1)
+    lcd.drawText(SX.vmin, y, p.minVCell and string.format("%.2f", p.minVCell) or "—",
+                 COLOR_THEME_PRIMARY1)
+    lcd.drawText(SX.last, y, p.lastUsed or "—",         COLOR_THEME_PRIMARY1)
+  end
+
+  drawScrollbar(LCD_W - PAD - 3, bodyY(2), last - start + 1, start, n)
+  drawButtonBar({ "Back" }, n + 1, S.statsCursor)
+end
+
+-- Read-only page: the wheel scrolls the rows, ENTER on Back or EXIT returns to the profile.
+function Screen.handleStats(e)
+  local n = #S.prof.instances
+  S.statsCursor = moveCursor(S.statsCursor, e, n + 1)   -- pack rows + Back
+  if isExit(e) or (isEnter(e) and S.statsCursor == n + 1) then
+    S.screen = SCREEN.PROFILE
+  end
+  return 0
+end
+
+-- ---------------------------------------------------------------------------
 -- Lifecycle
 -- ---------------------------------------------------------------------------
 
 local function init()
-  S.cfg, S.err, S.errDetail = loadConfig()
+  S.cfg, S.err, S.errDetail = Cfg.loadConfig()
   S.modelNames = {}
   S.cursor    = 1
   S.dialog    = nil
@@ -2380,20 +2674,21 @@ end
 -- Handle the event first, then draw — so one frame reflects the result of the
 -- input (no one-frame lag) and a modal dialog renders on top of its screen.
 local function handleEvent(event)
-  if S.dialog then handleDialog(event); return 0 end
-  if S.picker then handlePicker(event); return 0 end
-  if S.screen == SCREEN.FIRST_START  then return handleFirstStart(event)  end
-  if S.screen == SCREEN.CONFIG_ERROR then return handleConfigError(event) end
-  if S.screen == SCREEN.BATTERIES    then return handleBatteries(event)   end
-  if S.screen == SCREEN.PROFILE      then return handleProfile(event)     end
-  if S.screen == SCREEN.PACKS        then return handlePacks(event)       end
-  if S.screen == SCREEN.MODELS       then return handleModels(event)      end
-  if S.screen == SCREEN.MODEL        then return handleModel(event)       end
-  if S.screen == SCREEN.ASSIGN       then return handleAssign(event)      end
-  if S.screen == SCREEN.SENSORS      then return handleSensors(event)     end
-  if S.screen == SCREEN.DEFAULTS     then return handleDefaults(event)    end
-  if S.screen == SCREEN.ABOUT        then return handleAbout(event)       end
-  return handleMain(event)
+  if S.dialog then Screen.handleDialog(event); return 0 end
+  if S.picker then Screen.handlePicker(event); return 0 end
+  if S.screen == SCREEN.FIRST_START  then return Screen.handleFirstStart(event)  end
+  if S.screen == SCREEN.CONFIG_ERROR then return Screen.handleConfigError(event) end
+  if S.screen == SCREEN.BATTERIES    then return Screen.handleBatteries(event)   end
+  if S.screen == SCREEN.PROFILE      then return Screen.handleProfile(event)     end
+  if S.screen == SCREEN.PACKS        then return Screen.handlePacks(event)       end
+  if S.screen == SCREEN.STATS        then return Screen.handleStats(event)       end
+  if S.screen == SCREEN.MODELS       then return Screen.handleModels(event)      end
+  if S.screen == SCREEN.MODEL        then return Screen.handleModel(event)       end
+  if S.screen == SCREEN.ASSIGN       then return Screen.handleAssign(event)      end
+  if S.screen == SCREEN.SENSORS      then return Screen.handleSensors(event)     end
+  if S.screen == SCREEN.DEFAULTS     then return Screen.handleDefaults(event)    end
+  if S.screen == SCREEN.ABOUT        then return Screen.handleAbout(event)       end
+  return Screen.handleMain(event)
 end
 
 local function draw()
@@ -2404,32 +2699,34 @@ local function draw()
     S.lineMeasured = true
   end
   if S.screen == SCREEN.FIRST_START then
-    drawFirstStart()
+    Screen.drawFirstStart()
   elseif S.screen == SCREEN.CONFIG_ERROR then
-    drawConfigError()
+    Screen.drawConfigError()
   elseif S.screen == SCREEN.BATTERIES then
-    drawBatteries()
+    Screen.drawBatteries()
   elseif S.screen == SCREEN.PROFILE then
-    drawProfile()
+    Screen.drawProfile()
   elseif S.screen == SCREEN.PACKS then
-    drawPacks()
+    Screen.drawPacks()
+  elseif S.screen == SCREEN.STATS then
+    Screen.drawStats()
   elseif S.screen == SCREEN.MODELS then
-    drawModels()
+    Screen.drawModels()
   elseif S.screen == SCREEN.MODEL then
-    drawModel()
+    Screen.drawModel()
   elseif S.screen == SCREEN.ASSIGN then
-    drawAssign()
+    Screen.drawAssign()
   elseif S.screen == SCREEN.SENSORS then
-    drawSensors()
+    Screen.drawSensors()
   elseif S.screen == SCREEN.DEFAULTS then
-    drawDefaults()
+    Screen.drawDefaults()
   elseif S.screen == SCREEN.ABOUT then
-    drawAbout()
+    Screen.drawAbout()
   else
-    drawMain()
+    Screen.drawMain()
   end
-  if S.picker then drawPicker() end   -- overlays
-  if S.dialog then drawDialog() end   -- overlays
+  if S.picker then Screen.drawPicker() end   -- overlays
+  if S.dialog then Screen.drawDialog() end   -- overlays
 end
 
 local function run(event, touchState)

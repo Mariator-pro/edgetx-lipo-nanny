@@ -74,13 +74,16 @@ thresholds:
 
 | Trigger | Default | Default sound file |
 |---|---|---|
-| **Low / warn** | 30 % | `/SOUNDS/en/scripts/LIPONY/warn.wav` |
-| **Critical** | 20 % | `/SOUNDS/en/scripts/LIPONY/crit.wav` |
+| **Low / warn** | 30 % | `/SOUNDS/en/SCRIPTS/LIPONY/warn.wav` |
+| **Critical** | 20 % | `/SOUNDS/en/SCRIPTS/LIPONY/crit.wav` |
 
 - Each fires **once** per flight (it won't nag repeatedly).
 - Which file plays is selectable **per warning** under **Settings → Sound** —
   `warn.wav` / `crit.wav` are just the defaults. Drop any named `*.wav` into
-  `/SOUNDS/en/scripts/LIPONY/` and pick it there.
+  `/SOUNDS/en/SCRIPTS/LIPONY/` and pick it there.
+- **Optional haptic:** enable **Settings → Haptic feedback** and the radio also
+  buzzes with each warning (one pulse for Low, two for Critical; strength
+  selectable). No effect on radios without a vibration motor.
 - If you plug in a pack that is **already below the warn threshold**, the low
   announcement is suppressed (you knowingly started part used); the critical
   announcement stays armed.
@@ -92,15 +95,19 @@ thresholds:
 
 ---
 
-## Cycle counting & wear
+## Cycle counting, statistics & wear
 
 - A flight adds **+1 cycle** to a pack only if it drew **more than 10 %** of that
   pack's effective capacity; brief hops or aborted launches don't count. In
   parallel the consumption is split 50/50 and each pack is judged on its share.
+- At flight end the widget also records per-pack **statistics** (viewable under
+  Batteries → profile → **Statistics**): lifetime consumed mAh, the lowest cell
+  voltage seen under load, and the last-used date. These are logged for **every**
+  used pack, even when the flight was too short to earn a cycle.
 - Set a pack's **Wear %** (Batteries → profile → Packs) as it ages; the warnings
   then fire **earlier** without you re-tuning any thresholds.
-- Reset all cycle counts via **Settings → Reset statistics**; the running widget
-  picks the change up within a few seconds, no restart needed.
+- Reset all cycle counts and statistics via **Settings → Reset statistics**; the
+  running widget picks the change up within a few seconds, no restart needed.
 
 ---
 

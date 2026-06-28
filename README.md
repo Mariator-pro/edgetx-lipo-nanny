@@ -48,9 +48,9 @@ It solves three concrete problems:
 - At connect, the script reads the resting voltage, auto-selects the matching battery from a per-model library (or lets you pick when several fit), and estimates the starting state-of-charge from a chemistry-specific voltage curve (LiPo, LiPoHV, LiIon).
 - During flight, the FC-reported consumed-mAh counter (CRSF `Capa` by default) is offset by the start SoC, so remaining capacity reflects reality from the first second.
 - **Telemetry-system agnostic:** the four sensors (voltage, current, consumed mAh, link) default to the CRSF/ELRS names but are remappable **per model** in the tool, so FrSky S.Port and other systems work too.
-- Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable.
-- Per physical **pack** (#1, #2, …) the script keeps a **cycle count**.
-- Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired.
+- Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable. An optional **haptic buzz** (one pulse on warn, two on critical) can accompany them.
+- Per physical **pack** (#1, #2, …) the script keeps a **cycle count** plus read-only **statistics** (lifetime consumed mAh, lowest cell voltage seen, and the last-used date), all viewable per profile in the tool.
+- Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired. An optional **purchase date** per pack helps track battery age.
 
 ---
 
@@ -78,13 +78,13 @@ It solves three concrete problems:
        └── config.lua           ← written by the tool (created on first save)
    SOUNDS/
    └── en/
-       └── scripts/
+       └── SCRIPTS/
            └── LIPONY/
                ├── warn.wav     ← early warning    (e.g. "return to home")
                └── crit.wav     ← critical warning (e.g. "land now")
    ```
 
-   The WAV files are yours to supply — `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings**. The WAVs always live under `/SOUNDS/en/scripts/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
+   The WAV files are yours to supply; `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings**. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
 
 2. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 
@@ -92,19 +92,20 @@ It solves three concrete problems:
    - at least one **battery profile** (manufacturer, chemistry, capacity, cell count, packs)
    - the **model settings** for the active model (cell count, single vs. parallel, assigned batteries)
    - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the four sensors at your system's telemetry names
+   - *(optional)* the global **Settings** (warn / critical thresholds, per-warning sounds, haptic feedback)
 
 4. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
 5. *(Optional)* Open the widget settings to adjust:
-   - **Theme** — `Dark` / `Light`.
-   - **Transparency** — milky-overlay transparency level (light theme only).
-   - **TxtColor** — color of the heading / brand text: `Default` (the classic green), `Theme` (the focus color of your active EdgeTX theme), or `Custom` (pick any color via **CustomCol**).
+   - **Theme**: `Dark` / `Light`.
+   - **Transparency**: milky-overlay transparency level (light theme only).
+   - **Accent**: color of the heading / brand text. `Default` (the classic green), `Theme` (the focus color of your active EdgeTX theme), or `Custom` (pick any color via **AccentColor**).
 
 > 📐 **Recommended screen layouts:** EdgeTX names its widget-screen layouts `columns × rows` (e.g. `2×4` = 2 columns next to each other, 4 rows on top of each other → 8 zones). The Lipo Nanny widget is designed for a **half-width** zone, so it looks best in the layouts with **2 columns**:
 >
-> - **2×2** — half width, half height (the quarter-tile). This is the primary use case and shows the full layout with every value.
-> - **2×3** — half width, one third height. Slightly shorter, so the widget automatically switches to a more compact layout.
-> - **2×4** — half width, one quarter height. The shortest supported zone; it falls back to the most compact layout to stay readable.
+> - **2×2**: half width, half height (the quarter-tile). This is the primary use case and shows the full layout with every value.
+> - **2×3**: half width, one third height. Slightly shorter, so the widget automatically switches to a more compact layout.
+> - **2×4**: half width, one quarter height. The shortest supported zone; it falls back to the most compact layout to stay readable.
 
 > Detailed configuration and in-flight usage: see [`docs/configuration.md`](docs/configuration.md) and [`docs/usage.md`](docs/usage.md).
 
