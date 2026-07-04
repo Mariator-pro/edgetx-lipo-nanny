@@ -38,6 +38,8 @@ EdgeTX Lua script that tracks battery voltage and capacity, alerting the pilot b
 
 Lipo Nanny lets RC pilots focus on flying. The EdgeTX script watches the flight battery over your model's telemetry (ELRS/CRSF out of the box, other systems via per-model sensor mapping) and speaks up on its own: twice per flight, when it's time to return and when it's time to land.
 
+![Lipo Nanny widget in flight](docs/img/widget-flight.png)
+
 It solves three concrete problems:
 - **Deep discharge** that permanently damages LiPo cells.
 - **Guesswork about remaining flight time** during the flight.

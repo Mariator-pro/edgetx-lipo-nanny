@@ -21,6 +21,7 @@ These are normal, not errors; the widget is waiting for something:
 
 | Tile shows | Meaning / fix |
 |---|---|
+| `core.lua missing` | `/SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. It holds the shared logic and must sit next to `config.lua`. Add it and restart. (The tool shows a full-screen `core.lua missing` message for the same reason.) |
 | `Sensor missing` | A required sensor (voltage or consumed-mAh, `RxBt` / `Capa` by default) isn't present. Run **Discover sensors** in EdgeTX telemetry, or remap the names under **Tools → Lipo Nanny → Models → Sensors**. |
 | `Setup required` | No configuration yet. Open **Tools → Lipo Nanny** and create it. |
 | `Config invalid` | `config.lua` is corrupt or has the wrong schema version. Recreate it in the tool (**Settings → Reset configuration**), or fix/delete it on the PC. |

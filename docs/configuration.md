@@ -14,6 +14,8 @@ runtime. You never have to edit files on the PC.
 
 The main menu has four entries (plus **Exit**):
 
+![Lipo Nanny tool main menu](img/tool-menu.png)
+
 | Entry | What it does |
 |---|---|
 | **Batteries** | Your library of battery *profiles* (a model of battery) and their physical *packs*. |
@@ -59,6 +61,8 @@ name** (only while the name is a manual override).
 
 Each row is one physical pack: **ID** (`#1`, `#2`, …), **Cycles**, **Wear**,
 **Bought**, and **Delete**. Select a row and dive in to edit:
+
+![Packs sub-page in the tool](img/tool-packs.png)
 
 - **Cycles**: the stored cycle count (**0–9999**). Normally the widget increments
   it; editable here for corrections.
