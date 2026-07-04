@@ -742,7 +742,7 @@ local function withRetry(writeFn, onDone)
   if writeFn() then
     if onDone then onDone() end
   else
-    Nav.openDialog("Save failed — check SD card.",
+    Nav.openDialog("Save failed. Check SD card.",
                function() withRetry(writeFn, onDone) end, "Retry", "Cancel")
   end
 end
@@ -767,6 +767,17 @@ local function resetStats(onDone)
   withRetry(function() return Cfg.saveConfig(S.cfg) end, onDone)
 end
 
+-- Restores just the warning settings (thresholds, sounds, haptic) to defaults, then
+-- saves. Batteries, models, archive and cycle counts stay. Idempotent, so a retry is safe.
+local function resetSettings(onDone)
+  local d = Cfg.defaultConfig()
+  S.cfg.defaults       = d.defaults   -- warn_pct / crit_pct back to defaults
+  S.cfg.sounds         = d.sounds     -- {}, warnings fall back to the bundled sound
+  S.cfg.haptic         = nil          -- feedback off
+  S.cfg.hapticStrength = nil          -- default strength
+  withRetry(function() return Cfg.saveConfig(S.cfg) end, onDone)
+end
+
 -- Overwrites config.lua with factory defaults (batteries, models, archive and cycle
 -- counts all erased) and clears any parse/schema error. The pack-id counter safely
 -- restarts at 1 — nothing survives the reset that a fresh id could collide with.
@@ -784,7 +795,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function Screen.drawFirstStart()
-  drawHeader("LIPO NANNY — FIRST START")
+  drawHeader("LIPO NANNY - FIRST START")
   lcd.drawText(COL1, bodyY(1), "No configuration found.", COLOR_THEME_PRIMARY1)
   lcd.drawText(COL1, bodyY(2), "Press ENTER to create defaults.", COLOR_THEME_PRIMARY1)
   drawButtonBar({ "Create" }, 1, 1)
@@ -956,9 +967,9 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Top-level rows: Low (1), Critical (2), haptic on/off (3), haptic strength (4),
--- reset-stats (5), reset-config (6), Back (7), Save (8). The warning rows dive in to
--- edit their cells (DEF_SUBS); the haptic rows edit inline.
-local DEF_ITEMS = 8
+-- reset-settings (5), reset-stats (6), reset-config (7), Back (8), Save (9). The
+-- warning rows dive in to edit their cells (DEF_SUBS); the haptic rows edit inline.
+local DEF_ITEMS = 9
 local DEF_SUBS  = { "thr", "snd", "test" }
 
 local function defaultsDirty()
@@ -1051,8 +1062,10 @@ function Screen.drawDefaults()
       elseif S.cursor == item then f = f + INVERS end
       lcd.drawText(ST.snd, y, value, f)
     else
-      drawButton(PAD, y - 2, (item == 5) and "Reset statistics" or "Reset configuration",
-                 S.cursor == item)
+      local label = (item == 5) and "Reset settings"
+                 or (item == 6) and "Reset statistics"
+                 or "Reset configuration"
+      drawButton(PAD, y - 2, label, S.cursor == item)
     end
   end
 
@@ -1101,7 +1114,7 @@ function Screen.drawDefaults()
   end
 
   if nRows > rowsFit then drawScrollbar(LCD_W - PAD - 3, top0, rowsFit, start, nRows) end
-  drawButtonBar({ "Back", "Save" }, 7, S.cursor)
+  drawButtonBar({ "Back", "Save" }, 8, S.cursor)
 end
 
 function Screen.handleDefaults(e)
@@ -1179,14 +1192,17 @@ function Screen.handleDefaults(e)
     elseif S.cursor == 4 then
       S.defField, S.defOrig, S.defEditing = "hapticStrength", S.def.hapticStrength, true
     elseif S.cursor == 5 then
-      Nav.openDialog("Reset all statistics? Cycle counts and archive are lost.",
-                 function() resetStats(function() Nav.openAlert("Statistics reset") end) end)
+      Nav.openDialog("Reset settings to factory defaults? Only warnings, sounds and haptic change. No data is lost.",
+                 function() resetSettings(function() Nav.enterDefaults() end) end)
     elseif S.cursor == 6 then
-      Nav.openDialog("Reset configuration? All batteries and models are erased.",
-                 function() resetConfig(leaveDefaults) end)
+      Nav.openDialog("Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Profiles and models stay.",
+                 function() resetStats(function() Nav.openAlert("Statistics reset") end) end)
     elseif S.cursor == 7 then
-      cancelDefaults()   -- Back (discard with confirm if dirty)
+      Nav.openDialog("Factory reset? All batteries, models, statistics and settings are permanently erased.",
+                 function() resetConfig(leaveDefaults) end)
     elseif S.cursor == 8 then
+      cancelDefaults()   -- Back (discard with confirm if dirty)
+    elseif S.cursor == 9 then
       saveDefaults()
     end
   elseif isExit(e) then
@@ -1249,7 +1265,7 @@ function Screen.drawBatteries()
   drawHeader("BATTERIES")
   local items = batteryListItems()
   if #items == 0 then
-    lcd.drawText(COL1, bodyY(1), "No batteries yet — add your first.", COLOR_THEME_PRIMARY1)
+    lcd.drawText(COL1, bodyY(1), "No batteries yet - add your first.", COLOR_THEME_PRIMARY1)
   else
     -- Scrolling window between header and button bar (the "[+] Add new" cursor
     -- index, #items+1, keeps the list scrolled to the bottom).
@@ -1412,7 +1428,7 @@ local function buildProfileLines()
   local function folder(item, label, value) lines[#lines + 1] = { item = item, label = label, value = value, folder = true } end
 
   field(1, "Name", p.name .. (p.nameAuto and "  (auto)" or ""))
-  field(2, "Manufacturer", p.manufacturer ~= "" and p.manufacturer or "—")
+  field(2, "Manufacturer", p.manufacturer ~= "" and p.manufacturer or "-")
   field(3, "Chemistry", p.chemistry)
   field(4, "Capacity", p.capacityMah .. " mAh")
   field(5, "Cells", p.cells .. "S")
@@ -1850,7 +1866,7 @@ end
 local function deleteProfile()
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 then
-    Nav.openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. " — unassign first")
+    Nav.openAlert("Used by parallel model(s) " .. table.concat(names, ", ") .. ". Unassign first")
     return
   end
   Nav.openDialog("Delete profile and archive all " .. #S.profOrig.instances .. " packs?",
@@ -2421,10 +2437,10 @@ end
 
 -- Reason string if the highlighted pack must not be archived, else nil.
 local function packArchiveLocked()
-  if #S.prof.instances <= 1 then return "Last pack — delete the profile instead" end
+  if #S.prof.instances <= 1 then return "Last pack - delete the profile instead" end
   local names = parallelModelsUsing(S.cfg, S.prof.id)
   if #names > 0 and (#S.prof.instances - 1) < 2 then
-    return "Used by parallel model(s) " .. table.concat(names, ", ") .. " — keep 2+ packs"
+    return "Used by parallel model(s) " .. table.concat(names, ", ") .. " - keep 2+ packs"
   end
   return nil
 end
@@ -2461,7 +2477,7 @@ function Nav.enterPacks()
 end
 
 function Screen.drawPacks()
-  drawHeader("PACKS — " .. S.prof.name)
+  drawHeader("PACKS - " .. S.prof.name)
   local packs = S.prof.instances
 
   -- Column header row (bold, not selectable).
@@ -2504,7 +2520,7 @@ function Screen.drawPacks()
     cell(PK.id + ARROW_W + ARROW_GAP, "#" .. p.label, rowSel, false)
     cell(PK.cyc,  cyc,                cycActive,  cycActive and S.packEditCyc)
     cell(PK.wear, p.wear .. " %",     wearActive, wearActive and S.packEditWear)
-    cell(PK.buy,  p.buyDate or "—",   buyActive,  buyActive and S.packEditBuy)
+    cell(PK.buy,  p.buyDate or "-",   buyActive,  buyActive and S.packEditBuy)
     drawButton(PK.act, y - 2, "X", actActive)   -- compact delete box (header says "Delete")
   end
 
@@ -2609,7 +2625,7 @@ function Nav.enterStats()
 end
 
 function Screen.drawStats()
-  drawHeader("STATISTICS — " .. S.prof.name)
+  drawHeader("STATISTICS - " .. S.prof.name)
   local packs = S.prof.instances
 
   -- Column header row (bold, not selectable), same default font as the Packs table.
@@ -2633,9 +2649,9 @@ function Screen.drawStats()
     lcd.drawText(SX.id,   y, "#" .. p.label,            idF)
     lcd.drawText(SX.cyc,  y, tostring(p.cycles or 0),   COLOR_THEME_PRIMARY1)
     lcd.drawText(SX.mah,  y, tostring(p.totalMah or 0), COLOR_THEME_PRIMARY1)
-    lcd.drawText(SX.vmin, y, p.minVCell and string.format("%.2f", p.minVCell) or "—",
+    lcd.drawText(SX.vmin, y, p.minVCell and string.format("%.2f", p.minVCell) or "-",
                  COLOR_THEME_PRIMARY1)
-    lcd.drawText(SX.last, y, p.lastUsed or "—",         COLOR_THEME_PRIMARY1)
+    lcd.drawText(SX.last, y, p.lastUsed or "-",         COLOR_THEME_PRIMARY1)
   end
 
   drawScrollbar(LCD_W - PAD - 3, bodyY(2), last - start + 1, start, n)

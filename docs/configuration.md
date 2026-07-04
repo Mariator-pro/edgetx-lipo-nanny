@@ -139,6 +139,7 @@ rows and two reset buttons.
 | **Play** | Plays the row's currently selected sound (and, when haptic is on, its matching buzz — one pulse for Low, two for Critical), so you can check it exists and the volume is up. |
 | **Haptic feedback** | `On` / `Off` (default **Off**). When on, the radio buzzes alongside each voice warning. Has no effect on radios without a vibration motor. |
 | **Haptic strength** | `Soft` / `Normal` (default) / `Strong`, setting the pulse length. Only shown while **Haptic feedback** is on. |
+| **Reset settings** | Restores just the settings on this screen — thresholds, warning sounds and haptic — to their defaults. Batteries, models and all statistics are kept. |
 | **Reset statistics** | Zeroes every pack's **cycle count and statistics** (Life mAh, Vmin, Last used) and empties the archive. Profiles and models are kept. |
 | **Reset configuration** | Restores factory defaults; **all** batteries and models are erased. |
 

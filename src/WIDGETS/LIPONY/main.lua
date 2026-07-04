@@ -340,13 +340,19 @@ local function activeModelName()
   return nil
 end
 
--- Records which telemetry sensors the model actually has, so the widget can show
--- a clear "Sensor missing" hint instead of computing on absent values.
+-- Records which telemetry sensors the model actually has, so the widget can show a
+-- clear "Sensor missing" hint instead of computing on absent values. Setup changes
+-- rarely, so re-checked at the config-poll cadence (first tick checks immediately:
+-- lastSensorCheck starts at 0).
 local function checkSensors(ctx)
+  local now = getTime()
+  if ctx.lastSensorCheck ~= 0 and (now - ctx.lastSensorCheck) < CONFIG_POLL_INTERVAL then
+    return
+  end
+  ctx.lastSensorCheck = now
   ctx.hasRxBt = sensorExists(ctx.sensorVoltage)
   ctx.hasCurr = sensorExists(ctx.sensorCurrent)
   ctx.hasCapa = sensorExists(ctx.sensorCapacity)
-  ctx.hasRQly = sensorExists(ctx.sensorLink)
 end
 
 -- Reads the four sensors, applies plausibility filters and keeps the last valid
@@ -804,14 +810,14 @@ local function calculateTimeLeftSeconds(ctx)
   return restMah / 1000 / avgCurrent * 3600  -- mAh → Ah → h → s
 end
 
--- "calc.." during the first 60 s after CONNECTED, "—:—" when the value is
+-- "calc.." during the first 60 s after CONNECTED, "--:--" when the value is
 -- permanently uncalculable (e.g. Curr sensor missing), otherwise "mm:ss".
 local function formatTimeLeft(ctx)
-  if not ctx.hasCurr then return "—:—" end   -- no current sensor → not computable
+  if not ctx.hasCurr then return "--:--" end   -- no current sensor → not computable
   local elapsedS = (getTime() - ctx.connectedSinceTime) / 100
   if elapsedS < 60 then return "calc.." end
   local secs = calculateTimeLeftSeconds(ctx)
-  if not secs then return "—:—" end
+  if not secs then return "--:--" end
   local m = math.floor(secs / 60)
   local s = math.floor(secs % 60)
   if m > 99 then m = 99 end
@@ -831,15 +837,15 @@ end
 
 -- Bar-fill color (only the bar changes color, text stays neutral).
 local function getBarColor(restPct, warnPct, critPct)
-  if restPct > warnPct then return COLORS.accent        end   -- green (theme accent)
-  if restPct > critPct then return lcd.RGB(255, 180, 0)  end   -- yellow
-  return lcd.RGB(220, 40, 40)                                  -- red
+  if restPct > warnPct then return COLORS.accent end   -- green (theme accent)
+  if restPct > critPct then return WARN_COL      end
+  return CRIT_COL
 end
 
 -- Label "name #N" (or "#1+2" for parallel). Instances are { pos = N, id = … }
 -- pairs; the displayed number is the position, not the internal pack id.
 local function formatBatteryLabel(name, instances)
-  if not name then return "—" end
+  if not name then return "--" end
   if type(instances) ~= "table" or #instances == 0 then return name end
   if #instances == 1 then
     return name .. " #" .. tostring(instances[1].pos)
@@ -1018,7 +1024,7 @@ local function connectedMetrics(ctx)
     pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
     vText    = ctx.voltage and string.format("%.1f", ctx.voltage) or "--.-",
     vCell    = (ctx.voltage and ctx.cells and ctx.cells > 0)
-               and string.format("%.2f V/cell", ctx.voltage / ctx.cells) or "—.- V/cell",
+               and string.format("%.2f V/cell", ctx.voltage / ctx.cells) or "--.- V/cell",
     remText  = remaining and string.format("%d mAh", math.floor(remaining + 0.5)) or "-- mAh",
     ofText   = effective and string.format("of %d mAh", math.floor(effective + 0.5)) or "",
     consText = ctx.capacity and string.format("%d mAh", math.floor(ctx.capacity + 0.5)) or "-- mAh",
@@ -1049,13 +1055,13 @@ local function minColW()
 end
 
 -- FULL-tier column geometry: glyph is a fixed 19% of width `w`, the two text columns
--- split the rest. Returns (colW, glyphW); shared by renderer and tier picker.
+-- split the rest. Returns (colW, glyphW, colGap); shared by renderer and tier picker.
 local function fullColumns(w)
   local pad      = sx(4)
   local colGap   = sx(6)
   local gW       = math.floor(w * 0.19)
   local colW     = math.floor((w - 2 * pad - gW - 2 * colGap) / 2)
-  return colW, gW
+  return colW, gW, colGap
 end
 
 -- FULL tier: header, two metric columns and the battery glyph. The threshold bar
@@ -1068,8 +1074,7 @@ local function drawConnectedFull(w, h, m)
   local midTop     = pad + hdrH + METRIC_GAP
   local contentBot = h - pad
   local midH       = contentBot - midTop
-  local colW, gW   = fullColumns(w)
-  local colGap     = sx(6)
+  local colW, gW, colGap = fullColumns(w)
   local gX         = w - pad - gW
   local maxBigH    = math.floor(midH * 0.5)
   -- Size the % from a fixed "100%" reference so a single-digit reading ("1%") isn't
@@ -1133,7 +1138,7 @@ local function drawConnectedMedium(w, h, m)
   local function rowY(i) return pad + math.floor(i * span / 4 + 0.5) end
   -- Slim glyph (≈12% width) on the right, with the FULL tier's sx(4) margins.
   local gm            = sx(4)
-  local glyphGap      = 4
+  local glyphGap      = sx(4)   -- text→glyph gap, scaled like the other insets
   local gW            = math.floor(w * 0.12)
   local colW          = math.floor((w - 2 * pad - glyphGap - gW - gm) / 2)
   local leftX, rightX = pad, pad + colW + pad
@@ -1296,16 +1301,12 @@ local function pickMsgFont(lines, availW, availH)
 end
 
 -- Renders a list of strings as horizontally-centered lines, vertically centred in
--- the area BELOW `topY` (default 0) so a reserved header band isn't overlapped.
--- Clamped: on a zone too short the text starts at topY rather than above it.
--- `flag`/`lineH` set the (fixed) font; defaults to SMLSIZE when omitted.
--- Used by WAITING / error / informational tiles.
+-- the area BELOW `topY` so a reserved header band isn't overlapped. Clamped: on a
+-- zone too short the text starts at topY rather than above it. `flag`/`lineH` set
+-- the (fixed) font. Used by the error / informational tiles.
 local function drawCenteredLines(ctx, lines, topY, flag, lineH)
   local n = #lines
   if n == 0 then return end
-  topY  = topY or 0
-  flag  = flag or SMLSIZE
-  lineH = lineH or msgLineH(flag)
   local w, h   = ctx.zone.w, ctx.zone.h
   local cx     = math.floor(w / 2)
   local startY = topY + math.floor(((h - topY) - n * lineH) / 2)
@@ -1404,19 +1405,19 @@ local function drawEndedTile(ctx)
     end
     usedText = string.format("Used %d mAh%s", lf.usedMah, pctStr)
   else
-    usedText = "Used —"
+    usedText = "Used --"
   end
 
   local lastText
   if lf.lastVoltagePerCell then
     lastText = string.format("Last: %.2f V/cell", lf.lastVoltagePerCell)
   else
-    lastText = "Last: —.- V/cell"
+    lastText = "Last: --.- V/cell"
   end
 
   -- Total cycles of the flown pack(s). finalizeFlight already added this flight's +1
   -- to the config, so just read the stored count. Parallel shows both, e.g. "(16, 8)".
-  local cyclesStr = "—"
+  local cyclesStr = "--"
   if lf.instances and #lf.instances > 0 then
     local parts = {}
     for _, inst in ipairs(lf.instances) do
@@ -1483,7 +1484,8 @@ local function findCandidates(ctx)
       if ctx.restVoltage >= vMin and ctx.restVoltage <= vMax then
         for _, inst in ipairs(profile.instances or {}) do
           out[#out + 1] = { profile = profile, pos = inst.label,
-                            packId = inst.id, wear = inst.wear or 0 }
+                            packId = inst.id, wear = inst.wear or 0,
+                            cycles = inst.cycles or 0 }
         end
       end
     end
@@ -1605,8 +1607,7 @@ end
 -- Every instance of each model-assigned profile of the model's cell count,
 -- regardless of voltage plausibility. Used for the popup when
 -- nothing matched the resting voltage, so the pilot can still pick from all
--- profiles — and as the "is anything selectable at all?" check for the
--- cell-count-mismatch tile.
+-- profiles.
 local function allModelInstances(ctx)
   local out = {}
   if not ctx.config then return out end
@@ -1618,7 +1619,8 @@ local function allModelInstances(ctx)
     if profile and profile.cells == ctx.cells then
       for _, inst in ipairs(profile.instances or {}) do
         out[#out + 1] = { profile = profile, pos = inst.label,
-                          packId = inst.id, wear = inst.wear or 0 }
+                          packId = inst.id, wear = inst.wear or 0,
+                          cycles = inst.cycles or 0 }
       end
     end
   end
@@ -1766,17 +1768,11 @@ local function drawSelectionPopup(ctx)
     return
   end
 
-  -- Row texts in the small font so more entries fit and long names plus the
-  -- "(Nc)" cycle count aren't clipped.
+  -- Rows in the small font so more entries fit and long names plus the "(Nc)"
+  -- cycle count aren't clipped.
   local availW  = w - 2 * pad
-  local rows    = {}
-  local rowFlag = SMLSIZE
-  for i, item in ipairs(list) do
-    local label = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
-    rows[i] = label .. " (" .. cyclesFor(ctx, item.packId) .. "c)"
-  end
-  local _, rowTextH = lcd.sizeText("0", rowFlag)
-  local rowH = (rowFlag == SMLSIZE) and (rowTextH + sx(3)) or TH
+  local _, rowTextH = lcd.sizeText("0", SMLSIZE)
+  local rowH = rowTextH + sx(3)
 
   local cursor  = ctx.popupCursor or 1
   -- Drop the legend when keeping it would leave room for only one battery row; that
@@ -1811,8 +1807,11 @@ local function drawSelectionPopup(ctx)
     if i == cursor and confirmProgress > 0 then
       lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), BRAND, CONFIRM_FILL_OPACITY)
     end
+    local item   = list[i]
+    local row    = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
+                   .. " (" .. (item.cycles or 0) .. "c)"
     local prefix = (i == cursor) and "> " or "  "
-    dtext(pad, y, prefix .. rows[i], (i == cursor) and BRAND or COLORS.fg, rowFlag)
+    dtext(pad, y, prefix .. row, (i == cursor) and BRAND or COLORS.fg, SMLSIZE)
     y = y + rowH
   end
 
@@ -1945,7 +1944,7 @@ local function create(zone, options)
     hasRxBt = true,
     hasCurr = true,
     hasCapa = true,
-    hasRQly = true,
+    lastSensorCheck = 0,
 
     -- Robustness / error recovery
     errorStreak = 0,
@@ -2023,7 +2022,7 @@ local function tick(ctx)
   if pcall(tickImpl, ctx) then
     ctx.errorStreak = 0
   else
-    ctx.errorStreak = (ctx.errorStreak or 0) + 1
+    ctx.errorStreak = ctx.errorStreak + 1
     if ctx.errorStreak >= ERROR_LIMIT then
       ctx.fatalError = true
     end
