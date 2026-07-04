@@ -65,16 +65,17 @@ It solves three concrete problems:
 
 ## 📥 Installation
 
-1. **Copy the files onto the radio's SD card.** Copy everything below to the same locations (the data folder is created automatically on first save if it's missing):
+1. **Copy the files onto the radio's SD card.** Copy everything below to the same locations. `core.lua` holds the shared logic and must sit next to the widget and tool — both load it at startup and show a "core.lua missing" hint if it isn't there. (Only `config.lua` is created automatically, on first save.)
 
    ```
    WIDGETS/
    └── LIPONY/
-       └── main.lua             ← telemetry widget (runtime logic + warnings)
+       └── main.lua             ← telemetry widget (display)
    SCRIPTS/
    ├── TOOLS/
    │   └── LIPONY.lua           ← configuration tool
    └── LIPONY/
+       ├── core.lua             ← shared logic + config format (REQUIRED by both)
        └── config.lua           ← written by the tool (created on first save)
    SOUNDS/
    └── en/
@@ -125,6 +126,7 @@ If something's off, the widget tile usually tells you what:
 | `No batteries assigned` | Assign at least one matching battery profile to the model. |
 | `Cell count mismatch` | No assigned profile matches the model's cell count. |
 | `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. |
+| `core.lua missing` | `SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. Add it next to `config.lua` and restart. |
 
 **No voice warning?** Check that `warn.wav` / `crit.wav` exist and the radio volume is up.
 

@@ -22,10 +22,26 @@
 -- 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 -- =====================================================================
 
+-- Shared core module: config schema, persistence, defaults, chemistries and the
+-- runtime logic live in core.lua (installed alongside at /SCRIPTS/LIPONY/core.lua),
+-- so this editor and the widget read/write through one implementation.
+local core = loadScript("/SCRIPTS/LIPONY/core.lua")
+core = core and core()
+if not core then
+  local function run(event)
+    lcd.clear()
+    lcd.drawText(10, 10, "Lipo Nanny: core.lua missing", COLOR_THEME_PRIMARY1 or 0)
+    lcd.drawText(10, 40, "Install /SCRIPTS/LIPONY/core.lua", COLOR_THEME_PRIMARY1 or 0)
+    if event and event ~= 0 then return 2 end   -- any key closes the tool
+    return 0
+  end
+  return { run = run }
+end
+
 local VERSION        = "1.1.0"
-local SCHEMA_VERSION = 1
+local SCHEMA_VERSION = core.SCHEMA_VERSION
 local PATHS = {
-  config    = "/SCRIPTS/LIPONY/config.lua",
+  config    = core.CONFIG_PATH,
   soundDir  = "/SOUNDS/en/SCRIPTS/LIPONY/",   -- trailing slash: prefix for full paths
   soundList = "/SOUNDS/en/SCRIPTS/LIPONY",    -- no trailing slash: passed to dir()
 }
@@ -33,106 +49,17 @@ PATHS.warnSound = PATHS.soundDir .. "warn.wav"
 PATHS.critSound = PATHS.soundDir .. "crit.wav"
 
 -- ---------------------------------------------------------------------------
--- Serialization (same table shape the widget loads) + file write
+-- Config IO + serialization all live in core.lua, so the writer (this tool) and
+-- the reader (the widget) can never drift apart. `Cfg` aliases core, keeping the
+-- Cfg.loadConfig / Cfg.saveConfig / Cfg.serialize / Cfg.defaultConfig call sites
+-- below unchanged.
 -- ---------------------------------------------------------------------------
+local Cfg = core
 
--- Config IO + serialization.
-local Cfg = {}
-
-function Cfg.quoteString(s)
-  s = string.gsub(s, "\\", "\\\\")
-  s = string.gsub(s, '"', '\\"')
-  s = string.gsub(s, "\n", "\\n")
-  return '"' .. s .. '"'
-end
-
-function Cfg.serialize(value, indent)
-  local t = type(value)
-  if t == "number" or t == "boolean" then
-    return tostring(value)
-  elseif t == "string" then
-    return Cfg.quoteString(value)
-  elseif t == "table" then
-    local nextIndent = indent .. "  "
-    local parts      = {}
-    local arrayLen   = #value
-    for i = 1, arrayLen do
-      parts[#parts + 1] = nextIndent .. Cfg.serialize(value[i], nextIndent)
-    end
-    for k, v in pairs(value) do
-      local isArrayIndex = type(k) == "number" and k >= 1 and k <= arrayLen
-                           and math.floor(k) == k
-      if not isArrayIndex then
-        local keyStr
-        if type(k) == "string" then
-          keyStr = "[" .. Cfg.quoteString(k) .. "]"
-        else
-          keyStr = "[" .. tostring(k) .. "]"
-        end
-        parts[#parts + 1] = nextIndent .. keyStr .. " = " .. Cfg.serialize(v, nextIndent)
-      end
-    end
-    if #parts == 0 then return "{}" end
-    return "{\n" .. table.concat(parts, ",\n") .. ",\n" .. indent .. "}"
-  end
-  return "nil"
-end
-
--- Reads a whole file (block reads; "a" format is not on every build), or nil.
-function Cfg.readFile(path)
-  local ok, f = pcall(io.open, path, "r")
-  if not ok or not f then return nil end
-  local parts = {}
-  while true do
-    local rok, chunk = pcall(io.read, f, 4096)
-    if not rok or not chunk or chunk == "" then break end
-    parts[#parts + 1] = chunk
-  end
-  pcall(io.close, f)
-  return table.concat(parts)
-end
-
--- io.open "w" does NOT truncate on some EdgeTX/SD builds, so a shorter write would
--- leave the old tail behind — pad with trailing newlines (valid after the table) up
--- to the old length. Pcall-wrapped so a full/read-only SD never raises.
-function Cfg.writeFile(path, content)
-  local old = Cfg.readFile(path)
-  if old and #old > #content then
-    content = content .. string.rep("\n", #old - #content)
-  end
-  local ok, f = pcall(io.open, path, "w")
-  if not ok or not f then return false end
-  local wok = pcall(io.write, f, content)
-  pcall(io.close, f)
-  return wok == true
-end
-
--- ---------------------------------------------------------------------------
--- Config load / default / save
--- ---------------------------------------------------------------------------
-
--- Returns (config) on success, or (nil, errKind, detail) where errKind is
--- "missing" | "parse" | "schema".
-function Cfg.loadConfig()
-  local ok, f = pcall(io.open, PATHS.config, "r")
-  if not ok or not f then return nil, "missing" end
-  pcall(io.close, f)
-
-  local pok, result = pcall(dofile, PATHS.config)
-  if not pok then return nil, "parse", tostring(result) end
-  if type(result) ~= "table" then return nil, "parse", "not a table" end
-  if result.schemaVersion ~= SCHEMA_VERSION then
-    return nil, "schema", tostring(result.schemaVersion)
-  end
-  result.archive = result.archive or {}
-  result.sounds  = result.sounds or {}
-  return result
-end
-
--- Haptic strength range mirrors the widget; labels are the three user-facing steps,
--- dur maps strength 1..3 to a pulse length (kept in sync with the widget).
-local HAPTIC = { min = 1, max = 3, default = 2,
-                 labels = { "Soft", "Normal", "Strong" }, dur = { 15, 30, 50 } }
+-- Haptic feedback: the strength range, labels and pulse lengths come from core
+-- (shared with the widget's warning haptic). The Test-button helpers below are
+-- tool-only, attached here to the shared table.
+local HAPTIC = core.HAPTIC
 
 -- A config's strength, clamped to range and defaulted when missing/garbage.
 function HAPTIC.strengthOf(cfg)
@@ -152,27 +79,6 @@ function HAPTIC.test(on, strength, pulses)
   for i = 1, pulses do
     playHaptic(dur, (i < pulses) and dur or 0)   -- gap between pulses, none after the last
   end
-end
-
-function Cfg.defaultConfig()
-  return {
-    schemaVersion = SCHEMA_VERSION,
-    generation    = 0,
-    nextPackId    = 1,
-    defaults      = { warn_pct = 30, crit_pct = 20 },
-    batteries     = {},
-    archive       = {},
-    sounds        = {},
-    models        = {},
-  }
-end
-
--- Increments the reload sentinel and writes the config. Returns true on success.
-function Cfg.saveConfig(cfg)
-  cfg.generation = (cfg.generation or 0) + 1
-  local content = "-- Lipo-Nanny configuration (auto-generated by the Tools-Script).\n"
-                  .. "return " .. Cfg.serialize(cfg, "") .. "\n"
-  return Cfg.writeFile(PATHS.config, content)
 end
 
 -- ---------------------------------------------------------------------------
@@ -244,11 +150,11 @@ local SCREEN = {
   ABOUT        = "about",
 }
 
-local CHEM_NAMES = { "LiPo", "LiPoHV", "LiIon" }
+local CHEM_NAMES = core.CHEM_NAMES
 
--- Default telemetry sensor names (CRSF/ELRS). Must stay in sync with the widget's
--- DEFAULT_SENSOR_* constants. SENSOR_FIELDS drives the per-model sensor-editor rows.
-local DEFAULT_SENSORS = { voltage = "RxBt", current = "Curr", capacity = "Capa", link = "RQly" }
+-- Default telemetry sensor names (CRSF/ELRS), shared with the widget via core.
+-- SENSOR_FIELDS drives the per-model sensor-editor rows.
+local DEFAULT_SENSORS = core.DEFAULT_SENSORS
 -- `desc` is the multi-line "what it does + expected values" help shown for the
 -- focused field on the Sensors screen, so the pilot can map it to the right sensor
 -- of their telemetry system.
@@ -911,6 +817,7 @@ end
 -- {label, value} pairs so the popup can pixel-align the values in two columns.
 local ABOUT_PATHS = {
   { "Config:", PATHS.config },
+  { "Core:",   "/SCRIPTS/LIPONY/core.lua" },
   { "Widget:", "/WIDGETS/LIPONY/main.lua" },
   { "Tool:",   "/SCRIPTS/TOOLS/LIPONY.lua" },
   { "Sounds:", PATHS.soundDir },
