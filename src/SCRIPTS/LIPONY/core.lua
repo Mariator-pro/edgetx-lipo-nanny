@@ -59,10 +59,12 @@ local DEFAULT_SENSOR_CURRENT  = DEFAULT_SENSORS.current
 local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
 local DEFAULT_SENSOR_LINK     = DEFAULT_SENSORS.link
 
--- Default voice files; config.sounds.warn/.crit may override them. Missing files
--- stay silent (playFile no-ops).
+-- Default voice files; config.sounds.warn/.crit may override them (missing files
+-- play silently). Exported so the Tools-Script uses the same default paths.
 local WARN_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/warn.wav"
 local CRIT_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/crit.wav"
+Core.WARN_SOUND = WARN_SOUND
+Core.CRIT_SOUND = CRIT_SOUND
 
 -- Optional haptic alongside the warning sounds, off by default. strength 1..3 maps to
 -- a pulse length here (tune on the radio). Shared with the Tools-Script Test button.
@@ -73,6 +75,12 @@ local HAPTIC_STRENGTH_MIN     = HAPTIC.min
 local HAPTIC_STRENGTH_MAX     = HAPTIC.max
 local HAPTIC_STRENGTH_DEFAULT = HAPTIC.default
 local HAPTIC_DUR              = HAPTIC.dur
+
+-- Warning thresholds (remaining-capacity %): single source for the factory
+-- defaults and the editable range, read by defaultConfig(), getThresholds() and
+-- the Tools-Script editor. warn must stay above crit.
+local THRESHOLDS = { warn_pct = 30, crit_pct = 20, min = 1, max = 99 }
+Core.THRESHOLDS = THRESHOLDS
 
 -- Battery chemistries. Per entry: chargeVoltage (100% SoC), dischargeVoltage
 -- (0% SoC), a descending SoC curve of {v_per_cell, soc%} pairs (5% steps) used by
@@ -318,7 +326,7 @@ local function defaultConfig()
     schemaVersion = SCHEMA_VERSION,
     generation    = 0,
     nextPackId    = 1,
-    defaults      = { warn_pct = 30, crit_pct = 20 },
+    defaults      = { warn_pct = THRESHOLDS.warn_pct, crit_pct = THRESHOLDS.crit_pct },
     batteries     = {},
     archive       = {},
     sounds        = {},
@@ -694,14 +702,21 @@ end
 -- Derived metrics (thresholds, remaining %, remaining time)
 -- ---------------------------------------------------------------------------
 
--- Returns (warn_pct, crit_pct). Profile overrides win over the global defaults.
--- Sane fallbacks when no config is loaded so the widget still renders something
--- during bootstrap.
+-- Clamp a threshold into the editable range; a non-number falls back to `fallback`.
+local function clampPct(v, fallback)
+  if type(v) ~= "number" then return fallback end
+  if v < THRESHOLDS.min then return THRESHOLDS.min end
+  if v > THRESHOLDS.max then return THRESHOLDS.max end
+  return v
+end
+
+-- Returns (warn_pct, crit_pct): profile overrides win over the defaults, both
+-- clamped and falling back to the factory THRESHOLDS.
 local function getThresholds(ctx)
   local profile  = ctx.selectedProfile or {}
   local defaults = (ctx.config and ctx.config.defaults) or {}
-  local warn = profile.warn_pct or defaults.warn_pct or 30
-  local crit = profile.crit_pct or defaults.crit_pct or 20
+  local warn = clampPct(profile.warn_pct or defaults.warn_pct, THRESHOLDS.warn_pct)
+  local crit = clampPct(profile.crit_pct or defaults.crit_pct, THRESHOLDS.crit_pct)
   return warn, crit
 end
 
@@ -917,6 +932,12 @@ local function warnHaptic(ctx, pulses)
   end
 end
 
+-- Sound paths must be strings; anything else falls back so no garbage reaches playFile.
+local function strOr(v, fallback)
+  if type(v) == "string" then return v end
+  return fallback
+end
+
 -- Plays the warn / crit voice file once each as the remaining percentage drops
 -- past the thresholds. No debounce: the mAh counter only rises, so each
 -- threshold is crossed exactly once per flight.
@@ -929,12 +950,12 @@ local function evaluateWarnings(ctx)
   local warn, crit = getThresholds(ctx)
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
-    playFile(sounds.warn or WARN_SOUND)
+    playFile(strOr(sounds.warn, WARN_SOUND))
     warnHaptic(ctx, 1)
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
-    playFile(sounds.crit or CRIT_SOUND)
+    playFile(strOr(sounds.crit, CRIT_SOUND))
     warnHaptic(ctx, 2)
   end
 end

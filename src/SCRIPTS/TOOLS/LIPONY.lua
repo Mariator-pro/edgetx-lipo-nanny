@@ -25,13 +25,14 @@
 -- Shared core module: config schema, persistence, defaults, chemistries and the
 -- runtime logic live in core.lua (installed alongside at /SCRIPTS/LIPONY/core.lua),
 -- so this editor and the widget read/write through one implementation.
-local core = loadScript("/SCRIPTS/LIPONY/core.lua")
+local CORE_PATH = "/SCRIPTS/LIPONY/core.lua"
+local core = loadScript(CORE_PATH)
 core = core and core()
 if not core then
   local function run(event)
     lcd.clear()
     lcd.drawText(10, 10, "Lipo Nanny: core.lua missing", COLOR_THEME_PRIMARY1 or 0)
-    lcd.drawText(10, 40, "Install /SCRIPTS/LIPONY/core.lua", COLOR_THEME_PRIMARY1 or 0)
+    lcd.drawText(10, 40, "Install " .. CORE_PATH, COLOR_THEME_PRIMARY1 or 0)
     if event and event ~= 0 then return 2 end   -- any key closes the tool
     return 0
   end
@@ -45,8 +46,10 @@ local PATHS = {
   soundDir  = "/SOUNDS/en/SCRIPTS/LIPONY/",   -- trailing slash: prefix for full paths
   soundList = "/SOUNDS/en/SCRIPTS/LIPONY",    -- no trailing slash: passed to dir()
 }
-PATHS.warnSound = PATHS.soundDir .. "warn.wav"
-PATHS.critSound = PATHS.soundDir .. "crit.wav"
+-- Default sound paths from core, so the picker and Test button use the same files
+-- the widget plays. Trusts core (present past the guard above), like CONFIG_PATH etc.
+PATHS.warnSound = core.WARN_SOUND
+PATHS.critSound = core.CRIT_SOUND
 
 -- ---------------------------------------------------------------------------
 -- Config IO + serialization all live in core.lua, so the writer (this tool) and
@@ -60,6 +63,7 @@ local Cfg = core
 -- (shared with the widget's warning haptic). The Test-button helpers below are
 -- tool-only, attached here to the shared table.
 local HAPTIC = core.HAPTIC
+local THRESHOLDS = core.THRESHOLDS
 
 -- A config's strength, clamped to range and defaulted when missing/garbage.
 function HAPTIC.strengthOf(cfg)
@@ -85,8 +89,14 @@ end
 -- Custom warning sounds
 -- ---------------------------------------------------------------------------
 
--- Excluded from the named list — reachable via the "Default" option instead.
-local SOUND_DEFAULT_FILES = { ["warn.wav"] = true, ["crit.wav"] = true }
+-- Excluded from the named list — reachable via the "Default" option instead. The
+-- filenames are derived from the core default paths (last path segment) so a rename
+-- in core carries over instead of leaving a stale literal here.
+local function baseName(path) return string.match(path, "[^/]+$") end
+local SOUND_DEFAULT_FILES = {
+  [baseName(PATHS.warnSound)] = true,
+  [baseName(PATHS.critSound)] = true,
+}
 
 -- Sorted *.wav files in the sound folder (any user-named file shows up). pcall:
 -- dir() raises when the folder is missing. string.lower/match as free functions:
@@ -173,6 +183,15 @@ local SENSOR_FIELDS = {
       "Any value >0 = receiving. e.g. RQly, RSSI." } },
 }
 local TEXT_MAX = { mfr = 10, name = 30 }   -- manufacturer / profile-name char caps
+
+-- Editable ranges for a battery profile / model. Shared by the profile and model
+-- editors so both agree on the cell range: profile.cells must be comparable to
+-- model.cells for battery detection, so a single max keeps them from drifting apart.
+local LIMITS = {
+  cells       = { min = 1, max = 30,    default = 6 },
+  capacityMah = { min = 10, max = 50000, default = 1300 },
+  wear        = { min = 0, max = 50 },
+}
 
 -- Character groups for the ring picker. The active group is tracked in S.charGroup, so
 -- the wheel cycles within one group and wraps at its ends; MDL jumps to the next group's
@@ -817,7 +836,7 @@ end
 -- {label, value} pairs so the popup can pixel-align the values in two columns.
 local ABOUT_PATHS = {
   { "Config:", PATHS.config },
-  { "Core:",   "/SCRIPTS/LIPONY/core.lua" },
+  { "Core:",   CORE_PATH },
   { "Widget:", "/WIDGETS/LIPONY/main.lua" },
   { "Tool:",   "/SCRIPTS/TOOLS/LIPONY.lua" },
   { "Sounds:", PATHS.soundDir },
@@ -1037,9 +1056,9 @@ function Screen.handleDefaults(e)
         S.defEditing = false
       end
     else
-      -- Numeric fields, clamped without wrap: warn/crit (1..99), hapticStrength (1..3).
-      local hi = (field == "hapticStrength") and HAPTIC.max or 99
-      local lo = (field == "hapticStrength") and HAPTIC.min or 1
+      -- Numeric fields, clamped without wrap; ranges come from core.
+      local hi = (field == "hapticStrength") and HAPTIC.max or THRESHOLDS.max
+      local lo = (field == "hapticStrength") and HAPTIC.min or THRESHOLDS.min
       if isNext(e) and S.def[field] < hi then
         S.def[field] = S.def[field] + 1
       elseif isPrev(e) and S.def[field] > lo then
@@ -1232,8 +1251,9 @@ end
 
 local function newProfile()
   -- One placeholder pack (#1); its real pack id is minted on first save.
-  local p = { manufacturer = "", name = "", nameAuto = true, chemistry = "LiPo",
-              capacityMah = 1300, cells = 6, warn_pct = nil, crit_pct = nil,
+  local p = { manufacturer = "", name = "", nameAuto = true, chemistry = CHEM_NAMES[1],
+              capacityMah = LIMITS.capacityMah.default, cells = LIMITS.cells.default,
+              warn_pct = nil, crit_pct = nil,
               instances = { { id = nil, label = 1, wear = 0, cycles = 0 } } }
   p.name = genName(p)
   return p
@@ -1254,8 +1274,9 @@ end
 
 local function copyProfile(src)
   return { id = src.id, manufacturer = src.manufacturer or "", name = src.name or "",
-           nameAuto = src.nameAuto ~= false, chemistry = src.chemistry or "LiPo",
-           capacityMah = src.capacityMah or 1300, cells = src.cells or 6,
+           nameAuto = src.nameAuto ~= false, chemistry = src.chemistry or CHEM_NAMES[1],
+           capacityMah = src.capacityMah or LIMITS.capacityMah.default,
+           cells = src.cells or LIMITS.cells.default,
            warn_pct = src.warn_pct, crit_pct = src.crit_pct,
            instances = copyInstances(src.instances) }
 end
@@ -1654,19 +1675,19 @@ local function adjustNumber(e)
   elseif item == 4 then                              -- capacity (MDL toggles step)
     if isGroupSwitch(e) then
       S.capStep = (S.capStep == 10 and 100) or (S.capStep == 100 and 1000) or 10
-    elseif isNext(e) then p.capacityMah = math.min(50000, p.capacityMah + S.capStep)
-    elseif isPrev(e) then p.capacityMah = math.max(10, p.capacityMah - S.capStep) end
+    elseif isNext(e) then p.capacityMah = math.min(LIMITS.capacityMah.max, p.capacityMah + S.capStep)
+    elseif isPrev(e) then p.capacityMah = math.max(LIMITS.capacityMah.min, p.capacityMah - S.capStep) end
     refreshAutoName()
   elseif item == 5 then                              -- cells
-    if isNext(e) then p.cells = math.min(30, p.cells + 1)
-    elseif isPrev(e) then p.cells = math.max(1, p.cells - 1) end
+    if isNext(e) then p.cells = math.min(LIMITS.cells.max, p.cells + 1)
+    elseif isPrev(e) then p.cells = math.max(LIMITS.cells.min, p.cells - 1) end
     refreshAutoName()
   elseif item == 8 or item == 9 then                 -- warn/crit override (nil = follow default)
     local key = (item == 8) and "warn_pct" or "crit_pct"
     local def = (item == 8) and S.cfg.defaults.warn_pct or S.cfg.defaults.crit_pct
     local cur = p[key] or def         -- nil sits on the default value
-    if isNext(e) then cur = math.min(99, cur + 1)
-    elseif isPrev(e) then cur = math.max(1, cur - 1) end
+    if isNext(e) then cur = math.min(THRESHOLDS.max, cur + 1)
+    elseif isPrev(e) then cur = math.max(THRESHOLDS.min, cur - 1) end
     -- Landing back on the default value clears the override (shows "(default)").
     if cur == def then p[key] = nil else p[key] = cur end
   end
@@ -2001,7 +2022,7 @@ function Nav.enterModel(key)
   local active = modelFilename()
   if key then
     local m = S.cfg.models[key]
-    S.model = { filename = key, cells = m.cells or 6, parallel = m.parallel == true,
+    S.model = { filename = key, cells = m.cells or LIMITS.cells.default, parallel = m.parallel == true,
                 batteryIds = {}, sensors = {} }
     for _, id in ipairs(m.batteryIds or {}) do S.model.batteryIds[#S.model.batteryIds + 1] = id end
     if m.sensors then
@@ -2009,7 +2030,7 @@ function Nav.enterModel(key)
     end
     S.modelIsNew = false
   else
-    S.model = { filename = active, cells = 6, parallel = false, batteryIds = {}, sensors = {} }
+    S.model = { filename = active, cells = LIMITS.cells.default, parallel = false, batteryIds = {}, sensors = {} }
     S.modelIsNew = true
   end
   -- model.getSensor() only enumerates the active model, so non-active models show
@@ -2122,9 +2143,9 @@ function Screen.handleModel(e)
     if isExit(e) then
       S.modelEditing = false
     elseif isNext(e) then
-      S.model.cells = math.min(30, S.model.cells + 1)
+      S.model.cells = math.min(LIMITS.cells.max, S.model.cells + 1)
     elseif isPrev(e) then
-      S.model.cells = math.max(1, S.model.cells - 1)
+      S.model.cells = math.max(LIMITS.cells.min, S.model.cells - 1)
     elseif isEnter(e) then
       S.modelEditing = false
     end
@@ -2450,8 +2471,8 @@ function Screen.handlePacks(e)
   -- Editing the wear value of the dived row.
   if S.packEditWear then
     local p = packs[S.packDive]
-    if isNext(e) then p.wear = math.min(50, p.wear + 1)
-    elseif isPrev(e) then p.wear = math.max(0, p.wear - 1)
+    if isNext(e) then p.wear = math.min(LIMITS.wear.max, p.wear + 1)
+    elseif isPrev(e) then p.wear = math.max(LIMITS.wear.min, p.wear - 1)
     elseif isEnter(e) or isExit(e) then S.packEditWear = false end
     return 0
   end

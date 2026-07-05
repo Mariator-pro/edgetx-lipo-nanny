@@ -14,7 +14,9 @@ runtime. You never have to edit files on the PC.
 
 The main menu has four entries (plus **Exit**):
 
-![Lipo Nanny tool main menu](img/tool-menu.png)
+<p align="center">
+  <img src="img/tool-menu.png" width="480" alt="Lipo Nanny tool main menu">
+</p>
 
 | Entry | What it does |
 |---|---|
@@ -62,7 +64,9 @@ name** (only while the name is a manual override).
 Each row is one physical pack: **ID** (`#1`, `#2`, …), **Cycles**, **Wear**,
 **Bought**, and **Delete**. Select a row and dive in to edit:
 
-![Packs sub-page in the tool](img/tool-packs.png)
+<p align="center">
+  <img src="img/tool-packs.png" width="480" alt="Packs sub-page in the tool">
+</p>
 
 - **Cycles**: the stored cycle count (**0–9999**). Normally the widget increments
   it; editable here for corrections.

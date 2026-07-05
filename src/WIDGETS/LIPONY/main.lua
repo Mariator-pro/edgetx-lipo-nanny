@@ -20,11 +20,9 @@
 -- 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 -- =====================================================================
 
--- Shared core module: all non-display logic (config I/O, telemetry, the flight
--- state machine, battery detection, warnings and the derived metrics) lives in
--- core.lua (SD path /SCRIPTS/LIPONY/core.lua). If it can't be loaded, `core` stays
--- nil and drawTile() renders a "core.lua missing" tile — the widget still loads so
--- the hint is visible instead of a blank tile or a hard script error.
+-- Non-display logic (config I/O, telemetry, state machine, battery detection,
+-- warnings, metrics) lives in core.lua. If it fails to load, `core` stays nil
+-- and drawTile() shows a "core.lua missing" tile instead of crashing.
 local core
 do
   local chunk = loadScript("/SCRIPTS/LIPONY/core.lua")
@@ -34,48 +32,45 @@ do
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- Constants, palette + fonts
+-- ---------------------------------------------------------------------------
+
 -- Widget-only lifecycle constants (logic timings live in core.lua).
-local TICK_INTERVAL = 10   -- 0.1 s; data-processing cadence (10 Hz)
+local TICK_INTERVAL = 10   -- 0.1 s data-processing cadence
 local ERROR_LIMIT   = 5    -- consecutive tick failures before the widget gives up
 
 -- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
 local STICK_STEP        = 500  -- deflection that counts as one cursor step
-local STICK_DEADZONE    = 200  -- back inside this re-arms the next step (edge detection)
+local STICK_DEADZONE    = 200  -- re-arms the next step once back inside this
 local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
-local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit;
-                               -- long enough for the fill-bar confirm animation to read
--- Opacity (0 invisible … 15 opaque) of the confirm-hold fill: drawn in the brand
--- colour but semi-transparent, so the solid-brand cursor text stays readable on top
--- whatever brand colour the pilot picked (no separate dim shade to maintain).
+local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit
+-- Opacity of the confirm-hold fill (0 = opaque, 15 = invisible): semi-transparent
+-- so the solid-brand cursor text stays readable on top.
 local CONFIRM_FILL_OPACITY = 8
 
--- Display scaling: pixel constants are relative to a 480 px reference width,
--- matching EdgeTX's own LVGL 480-baseline. Wider screens scale up by S = LCD_W/480
--- (an 800 px screen → S ≈ 1.67; a 480 px screen → S = 1.0).
+-- Pixel constants are relative to a 480 px reference width; S scales them up on
+-- wider screens (S = LCD_W/480).
 local REF_W = 480
 local S     = (LCD_W or REF_W) / REF_W
 local TH    = math.floor(18 * S + 0.5)  -- standard line height for default font
 local function sx(v) return math.floor(v * S + 0.5) end
 
--- Slack on the FULL/MEDIUM height thresholds (connectedFitsFull / drawConnectedTile):
--- a zone whose height lands a pixel or two above a tier boundary (e.g. 112 px vs
--- needH 111) would otherwise flip tier on a minor font-metric change. The
--- tolerance just widens the margin — it doesn't move any measured zone to a new tier.
+-- Slack on the FULL/MEDIUM height thresholds so a zone a pixel or two above a tier
+-- boundary doesn't flip tier on a minor font-metric change.
 local TIER_TOL = sx(4)
 
--- Uniform vertical gap between the FULL tier's stacked rows (header→big number→
--- caption→value→sub-line). Kept tight (sx(1)) so the four metric rows fit a short
--- quarter-page tile (215×112) at FULL without shrinking the %/V readouts. Used by
--- drawConnectedFull, drawMetricBlock and the connectedFitsFull height check, which
--- must all agree or the glyph/tier maths drift apart.
+-- Uniform vertical gap between the FULL tier's stacked rows (header/big number/
+-- caption/value/sub-line), kept tight so a quarter-page tile still fits at FULL.
+-- Used by drawConnectedFull, drawMetricBlock and connectedFitsFull — all three
+-- must agree or the tier maths drift apart.
 local METRIC_GAP = sx(1)
 
 -- Two palettes, picked per frame by the "Theme" option (see refresh()). DARK paints
--- its own near-black panel; LIGHT stays transparent (radio theme shows through) with
--- black text. `accent` is the OK/"good"-state green (%/bar/glyph/voltage); the
--- yellow/red escalation colours are identical in both themes. The brand/heading
--- colour is a SEPARATE variable (BRAND, below) so the Accent option can recolour
--- the marque without ever touching these state colours.
+-- a near-black panel; LIGHT stays transparent so the radio theme shows through.
+-- `accent` is the "good"-state green (%/bar/glyph/voltage); warn/crit colours are
+-- theme-independent. Brand/heading colour is separate (BRAND, below) so the Accent
+-- option never touches these state colours.
 local DARK = {
   panel   = lcd.RGB( 18,  20,  18),   -- near-black background
   accent  = lcd.RGB(124, 210,  48),   -- lime green (% / V / bar / glyph "ok" state)
@@ -99,15 +94,13 @@ local CRIT_COL = lcd.RGB(220,  40,  40)
 local COLORS = DARK
 
 -- Brand/heading colour, resolved once per frame in refresh() from the Accent
--- option. Kept apart from COLORS.accent on purpose: sharing one variable would let
--- the option bleed into the bar/%/voltage state colours. Default is the active
--- palette's accent green, so each theme keeps its own green when set to "Default".
+-- option. Kept apart from COLORS.accent so the option can't bleed into the
+-- bar/%/voltage state colours.
 local BRAND = DARK.accent
 
--- Resolve the brand text colour from the Accent option: "Theme" pulls the active
--- EdgeTX theme's focus colour, "Custom" the AccentColor picker value. lcd.getColor
--- normalises either to a real RGB (the picker value may be a theme index, not raw
--- RGB). Falls back to the palette accent (Default) if unavailable.
+-- Resolves the brand colour from the Accent option: "Theme" uses the active EdgeTX
+-- focus colour, "Custom" the AccentColor picker (lcd.getColor normalises a theme
+-- index to real RGB). Falls back to the palette accent (Default) if unavailable.
 local function brandColor(opt, customCol)
   if opt == 2 and lcd.getColor then
     local c = lcd.getColor(COLOR_THEME_FOCUS)
@@ -123,25 +116,49 @@ end
 local EYE_WHITE = lcd.RGB(245, 245, 245)
 local EYE_RIM   = lcd.RGB( 20,  20,  20)
 
--- Font flags from largest to smallest. XXLSIZE/DBLSIZE/MIDSIZE/SMLSIZE are EdgeTX
--- globals; 0 is the default font. Used by pickFont() to scale to the zone.
+-- Font flags from largest to smallest (0 = default font). Used by pickFont() to
+-- scale text to the zone.
 local FONT_STEPS = { XXLSIZE, DBLSIZE, MIDSIZE, 0, SMLSIZE }
+
+-- Text-metric caches: fonts never change at runtime, so measurements are
+-- session-constant. Height depends only on the font, width on font + text.
+local FONT_H, TEXT_W = {}, {}
+local function fontH(flags)
+  flags = flags or 0
+  local h = FONT_H[flags]
+  if not h then
+    h = select(2, lcd.sizeText("0", flags))
+    FONT_H[flags] = h
+  end
+  return h
+end
+local function textW(text, flags)
+  flags = flags or 0
+  local byFlag = TEXT_W[flags]
+  if not byFlag then byFlag = {}; TEXT_W[flags] = byFlag end
+  local w = byFlag[text]
+  if not w then w = lcd.sizeText(text, flags); byFlag[text] = w end
+  return w
+end
 
 -- Largest font flag whose rendered text fits within maxW×maxH, plus its measured
 -- width/height. Falls back to the smallest font if nothing fits.
 local function pickFont(text, maxW, maxH)
   for _, flag in ipairs(FONT_STEPS) do
-    local tw, th = lcd.sizeText(text, flag)
+    local tw, th = textW(text, flag), fontH(flag)
     if tw <= maxW and th <= maxH then return flag, tw, th end
   end
-  local tw, th = lcd.sizeText(text, SMLSIZE)
+  local tw, th = textW(text, SMLSIZE), fontH(SMLSIZE)
   return SMLSIZE, tw, th
 end
 
--- Draws coloured text. A raw lcd.RGB() value must NOT be added to the drawText
--- flags — its bits collide with the size/attribute flags (a green accent can flip
--- a size bit and double the font). EdgeTX's custom colour goes through the
--- CUSTOM_COLOR slot; `flags` then carries only size/align/BOLD.
+-- ---------------------------------------------------------------------------
+-- Drawing + format helpers
+-- ---------------------------------------------------------------------------
+
+-- Draws coloured text. A raw lcd.RGB() value must not be added into the drawText
+-- flags (its bits collide with size/attribute flags); colour goes through the
+-- CUSTOM_COLOR slot instead, so `flags` only carries size/align/BOLD.
 local function dtext(x, y, text, color, flags)
   lcd.setColor(CUSTOM_COLOR, color)
   lcd.drawText(x, y, text, CUSTOM_COLOR + (flags or 0))
@@ -168,9 +185,8 @@ local function formatBatteryLabel(name, instances)
 end
 
 -- ---------------------------------------------------------------------------
--- CONNECTED tile: large readouts, a segmented battery glyph and a threshold bar.
--- One responsive layout that scales down through FULL → MEDIUM → SMALL tiers by
--- zone size.
+-- CONNECTED tile: readouts, battery glyph and threshold bar, scaling down through
+-- FULL → MEDIUM → SMALL tiers by zone size.
 -- ---------------------------------------------------------------------------
 
 -- One font step smaller than `flag` (used to render a value's unit smaller than
@@ -184,7 +200,7 @@ end
 
 -- Shrinks `flag` step by step until `text` fits within `maxW` (never below SMLSIZE).
 local function fitWidth(text, flag, maxW)
-  while flag ~= SMLSIZE and lcd.sizeText(text, flag) > maxW do
+  while flag ~= SMLSIZE and textW(text, flag) > maxW do
     flag = smallerFont(flag)
   end
   return flag
@@ -194,20 +210,20 @@ end
 -- number. Returns the total drawn width.
 local function drawValueUnit(x, y, value, unit, color, valueFlag, unitFlag)
   dtext(x, y, value, color, valueFlag)
-  local vw, vh = lcd.sizeText(value, valueFlag)
+  local vw, vh = textW(value, valueFlag), fontH(valueFlag)
   if unit and unit ~= "" then
     local gap     = sx(3)
-    local uw, uh  = lcd.sizeText(unit, unitFlag)
+    local uw, uh  = textW(unit, unitFlag), fontH(unitFlag)
     dtext(x + vw + gap, y + (vh - uh), unit, color, unitFlag)
     return vw + gap + uw
   end
   return vw
 end
 
--- "● Name #N" header: a small accent dot followed by the battery label, drawn at
--- caption size (SMLSIZE, non-bold) so it is no larger than e.g. "REMAINING".
+-- "● Name #N" header: accent dot plus battery label, drawn at caption size
+-- (SMLSIZE) so it's no larger than e.g. "REMAINING".
 local function drawHeaderLabel(x, y, label)
-  local _, th = lcd.sizeText(label, SMLSIZE)   -- text height, to centre the dot
+  local th = fontH(SMLSIZE)   -- text height, to centre the dot
   local dot   = sx(5)
   lcd.drawFilledRectangle(x, y + math.floor((th - dot) / 2), dot, dot, BRAND)
   dtext(x + dot + sx(3), y, label, BRAND, SMLSIZE)
@@ -242,11 +258,10 @@ local function drawBatteryGlyph(x, y, w, h, pct, color, nSeg)
   end
 end
 
--- Horizontal threshold bar: track, threshold-coloured fill up to `pct`, yellow/red
--- tick marks at the warn/crit positions and, when `withLabels`, the WARN caption
--- ABOVE the bar and the CRIT caption BELOW it — so the two never collide even when
--- the thresholds sit close together. Caller must leave one text line above and
--- below the bar.
+-- Horizontal threshold bar: track, coloured fill, yellow/red tick marks at
+-- warn/crit, and (if withLabels) the WARN caption above / CRIT caption below the
+-- bar so close thresholds never collide. Caller must leave one text line above
+-- and below the bar.
 local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
   local p     = math.max(0, math.min(100, pct or 0))
@@ -262,9 +277,9 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   tick(warn, WARN_COL)
   tick(crit, CRIT_COL)
   if withLabels then
-    local _, lh = lcd.sizeText("0", SMLSIZE)
+    local lh = fontH(SMLSIZE)
     local function label(thr, txt, col, ly)
-      local tw = lcd.sizeText(txt, SMLSIZE)
+      local tw = textW(txt, SMLSIZE)
       local lx = x + math.floor(w * thr / 100) - math.floor(tw / 2)
       if lx < x then lx = x elseif lx + tw > x + w then lx = x + w - tw end
       dtext(lx, ly, txt, col, SMLSIZE)
@@ -274,23 +289,20 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   end
 end
 
--- A metric column: big number+unit (in `bigFlag`, bottom-aligned to `bigBottom`),
--- then a small caption, a value line and a small sub-line. Both columns share the
--- same `bigBottom`, so their caption/value/sub rows line up across the tile even
+-- A metric column: big number+unit (bottom-aligned to `bigBottom`), then caption,
+-- value and sub-line. Both columns share `bigBottom` so their rows line up even
 -- when the two big numbers use different font sizes.
 local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLine, subLine, bigFlag, colW)
-  local _, bigH = lcd.sizeText(big .. unit, bigFlag)
+  local bigH = fontH(bigFlag)
   drawValueUnit(x, bigBottom - bigH, big, unit, bigColor, bigFlag, smallerFont(bigFlag))
-  -- Caption / value / sub-line separated by ONE uniform gap, each placed using its
-  -- own measured height — not a fixed TH = 18*S line-height approximation, which
-  -- drifts from the real font on larger/smaller screens and looks uneven.
+  -- Caption / value / sub-line separated by one uniform gap, each placed at its
+  -- own measured height (not a fixed TH approximation, which drifts across screens).
   local gap     = METRIC_GAP
-  local _, capH = lcd.sizeText(capLine, SMLSIZE)
-  -- The value line is the only block element in a real font (caption/sub are
-  -- already SMLSIZE), so shrink it to the column on narrow tiles (e.g. a quarter
-  -- page) instead of letting "1500 mAh" spill into the next column.
+  local capH = fontH(SMLSIZE)
+  -- Value line is the only element in a real (non-SMLSIZE) font, so shrink it to
+  -- the column width instead of letting e.g. "1500 mAh" spill over.
   local valFlag = fitWidth(valLine, 0, colW)
-  local _, valH = lcd.sizeText(valLine, valFlag)
+  local valH = fontH(valFlag)
   local y = bigBottom + gap
   dtext(x, y, capLine, COLORS.muted, SMLSIZE)
   y = y + capH + gap
@@ -300,9 +312,8 @@ local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLi
 end
 
 -- Colour for the live voltage readout: green/yellow/red from the chemistry's
--- per-cell loaded-voltage thresholds (voltageWarn/voltageCrit). The green end is the
--- theme accent (lime in Dark, darker green in Light); yellow/red are fixed. Falls
--- back to the accent green when voltage/cells/chemistry are unavailable.
+-- per-cell voltage thresholds. Falls back to the accent green when
+-- voltage/cells/chemistry are unavailable.
 local function voltageColor(ctx)
   local profile = ctx.selectedProfile
   local chem    = profile and core.CHEMISTRIES[profile.chemistry]
@@ -320,10 +331,8 @@ local function connectedMetrics(ctx)
   local restPct    = core.calculateRestPct(ctx)
   local warn, crit = core.getThresholds(ctx)
   local effective  = core.effectiveCapacityMah(ctx)
-  -- `used` (telemetry consumed + pre-flight start offset) drives the remaining %
-  -- and the remaining-mAh figure. The CONSUMED display, however, shows only the
-  -- in-flight telemetry value (ctx.capacity) — what the pilot actually drew this
-  -- flight, not the offset for a not-quite-full pack.
+  -- `used` includes the pre-flight start offset (drives remaining %/mAh); the
+  -- CONSUMED display shows only ctx.capacity, the in-flight telemetry value.
   local used       = (ctx.capacity and ctx.startOffsetMah) and (ctx.capacity + ctx.startOffsetMah) or nil
   local remaining  = (effective and used) and math.max(0, effective - used) or nil
   local profile    = ctx.selectedProfile and ctx.selectedProfile.name or nil
@@ -350,8 +359,8 @@ end
 -- the caller can decide whether it fits and where to centre it.
 local TIME_VAL_FLAG = MIDSIZE
 local function flightTimeBlockH()
-  local _, capH = lcd.sizeText("TIME LEFT", SMLSIZE)
-  local _, valH = lcd.sizeText("00:00", TIME_VAL_FLAG)
+  local capH = fontH(SMLSIZE)
+  local valH = fontH(TIME_VAL_FLAG)
   return capH + sx(1) + valH, capH
 end
 local function drawFlightTimeBlock(cx, top, value)
@@ -363,8 +372,8 @@ end
 -- Widest fixed (SMLSIZE) line a metric column must hold, so a column narrower than
 -- this would clip "of 0000 mAh" / "0.00 V/cell".
 local function minColW()
-  return math.max(lcd.sizeText("of 0000 mAh", SMLSIZE),
-                  lcd.sizeText("0.00 V/cell", SMLSIZE))
+  return math.max(textW("of 0000 mAh", SMLSIZE),
+                  textW("0.00 V/cell", SMLSIZE))
 end
 
 -- FULL-tier column geometry: glyph is a fixed 19% of width `w`, the two text columns
@@ -378,37 +387,36 @@ local function fullColumns(w)
 end
 
 -- FULL tier: header, two metric columns and the battery glyph. The threshold bar
--- is added at the bottom only when there is enough free height below the content
--- (so it appears on roomy half/full-page tiles but not on short/cramped ones).
+-- is added only if there's enough free height below the content.
 local function drawConnectedFull(w, h, m)
   local pad        = sx(4)
   drawHeaderLabel(pad, pad, m.label)
-  local _, hdrH    = lcd.sizeText(m.label, SMLSIZE)   -- actual header height (SMLSIZE)
+  local hdrH    = fontH(SMLSIZE)   -- actual header height (SMLSIZE)
   local midTop     = pad + hdrH + METRIC_GAP
   local contentBot = h - pad
   local midH       = contentBot - midTop
   local colW, gW, colGap = fullColumns(w)
   local gX         = w - pad - gW
   local maxBigH    = math.floor(midH * 0.5)
-  -- Size the % from a fixed "100%" reference so a single-digit reading ("1%") isn't
-  -- bigger than "100%". V is one step smaller (shrunk further only if it overflows).
+  -- Size % from a fixed "100%" reference so "1%" isn't bigger than "100%"; V is
+  -- one step smaller (shrunk further only if it overflows).
   local pctFlag    = pickFont("100%", colW, maxBigH)
   local vFlag      = fitWidth(m.vText .. "V", smallerFont(pctFlag), colW)
   -- Shared bottom edge for both big numbers (= the taller, % one) so the rows
   -- beneath them align across the two columns.
-  local _, pctH    = lcd.sizeText(m.pctText .. "%", pctFlag)
+  local pctH    = fontH(pctFlag)
   local bigBottom  = midTop + pctH
   drawMetricBlock(pad, bigBottom, m.pctText, "%", m.pctColor,
                   "REMAINING", m.remText, m.ofText, pctFlag, colW)
   drawMetricBlock(pad + colW + colGap, bigBottom, m.vText, "V", m.vColor,
                   m.vCell, m.consText, "CONSUMED", vFlag, colW)
-  local _, smlH    = lcd.sizeText("0", SMLSIZE)
-  local _, valH    = lcd.sizeText("0", 0)   -- value row (default font)
+  local smlH    = fontH(SMLSIZE)
+  local valH    = fontH(0)   -- value row (default font)
   -- Mirror drawMetricBlock's uniform-gap stack: bottom of the CONSUMED/"of … mAh" line.
   local textBottom = bigBottom + METRIC_GAP + smlH + METRIC_GAP + valH + METRIC_GAP + smlH
-  -- Threshold bar pinned to the bottom, only if it fits below the content. With
-  -- labels it reserves one line above (WARN) and one below (CRIT). Resolved BEFORE
-  -- the glyph so the glyph knows whether anything sits below it.
+  -- Threshold bar pinned to the bottom if it fits below the content (with labels,
+  -- one line above/below for WARN/CRIT). Resolved before the glyph so the glyph
+  -- knows whether anything sits below it.
   local barH       = sx(8)
   local roomBelow  = contentBot - textBottom
   local hasBar     = roomBelow >= barH + sx(4)
@@ -439,24 +447,21 @@ end
 -- MEDIUM tier: the FULL two-column content (header, %/V, labels, mAh, of-X/CONSUMED)
 -- all at SMLSIZE with a slim glyph, so 5 rows fit a short 1/6 tile.
 local function drawConnectedMedium(w, h, m)
-  local pad           = sx(4)   -- same edge inset as FULL/ENDED so the header
-  drawHeaderLabel(pad, pad, m.label)  -- doesn't shift when the tier changes
-  local _, smlH       = lcd.sizeText("0", SMLSIZE)
-  -- 5 rows (header + 4 data) spread evenly between top and bottom pad. Each row's y
-  -- comes DIRECTLY from the total span (rounded), not an accumulated floored `lead`
-  -- whose dropped fractions pile onto the bottom edge as an uneven gap. So the last
-  -- row always lands at h-pad (bottom margin == top pad); `span` floored to avoid overlap.
+  local pad           = sx(4)   -- same edge inset as FULL/ENDED so the header doesn't shift on tier change
+  drawHeaderLabel(pad, pad, m.label)
+  local smlH       = fontH(SMLSIZE)
+  -- 5 rows spread evenly between top/bottom pad; each row's y is computed directly
+  -- from the total span (not accumulated) so rounding never piles onto the last row.
   local span          = h - 2 * pad - smlH
   if span < 4 * (smlH - 4) then span = 4 * (smlH - 4) end
   local function rowY(i) return pad + math.floor(i * span / 4 + 0.5) end
-  -- Slim glyph (≈12% width) on the right, with the FULL tier's sx(4) margins.
+  -- Slim glyph (~12% width) on the right, same sx(4) margins as FULL.
   local gm            = sx(4)
-  local glyphGap      = sx(4)   -- text→glyph gap, scaled like the other insets
+  local glyphGap      = sx(4)
   local gW            = math.floor(w * 0.12)
   local colW          = math.floor((w - 2 * pad - glyphGap - gW - gm) / 2)
   local leftX, rightX = pad, pad + colW + pad
-  -- Glyph top at the first metric row; bottom with the same fixed inset (gm = sx(4))
-  -- as the right edge, so the gap to the bottom matches the gap to the right side.
+  -- Glyph top at the first metric row; bottom uses the same inset as the right edge.
   local gTop          = rowY(1)
   drawBatteryGlyph(w - gm - gW, gTop, gW, (h - gm) - gTop, m.restPct, m.pctColor, 5)
   dtext(leftX,  rowY(1), m.pctText .. " %", m.pctColor, SMLSIZE)
@@ -469,14 +474,13 @@ local function drawConnectedMedium(w, h, m)
   dtext(rightX, rowY(4), "CONSUMED",  COLORS.muted, SMLSIZE)
 end
 
--- SMALL tier: like MID (rows evenly spread, no glyph) but with an adaptive row count;
--- all SMLSIZE except the %/V row, which scales to the row height (the whole zone when
--- it's the only row). Rows kept by priority as height allows: %/V, header, the
--- REMAINING/V-cell labels, then mAh values and of-X/CONSUMED (which drop first).
+-- SMALL tier: like MEDIUM but with an adaptive row count (no glyph); all SMLSIZE
+-- except %/V, which scales to the row height. Rows kept by priority: %/V, header,
+-- REMAINING/V-cell, mAh values, of-X/CONSUMED (dropped first).
 local function drawConnectedSmall(w, h, m)
   local pad     = sx(4)   -- match FULL/MEDIUM/ENDED edge inset (consistent header)
   local gap     = 2
-  local _, smlH = lcd.sizeText("0", SMLSIZE)
+  local smlH = fontH(SMLSIZE)
   local avail   = h - 2 * pad
   local colW          = math.floor((w - 3 * pad) / 2)   -- full width, no glyph column
   local leftX, rightX = pad, pad + colW + pad
@@ -492,9 +496,9 @@ local function drawConnectedSmall(w, h, m)
   local rowsBaseH = nRows * smlH + (nRows - 1) * gap
   local extra     = math.max(0, avail - rowsBaseH)
   local pctS, vS  = m.pctText .. " %", m.vText .. " V"
-  local bigRef    = (lcd.sizeText(pctS, SMLSIZE) >= lcd.sizeText(vS, SMLSIZE)) and pctS or vS
+  local bigRef    = (textW(pctS, SMLSIZE) >= textW(vS, SMLSIZE)) and pctS or vS
   local bigFlag   = pickFont(bigRef, colW, math.min(smlH + extra, 2 * smlH))
-  local _, bigH   = lcd.sizeText(bigRef, bigFlag)
+  local bigH   = fontH(bigFlag)
 
   local function pairDraw(lt, lc, rt, rc)
     return function(y)
@@ -539,8 +543,7 @@ local function drawConnectedSmall(w, h, m)
 end
 
 -- Blinking red "receiving" dot in the top-right corner: shown while the link is
--- up, toggling at 0.5 Hz so the pilot can see fresh telemetry is arriving (and
--- that the script is running). It stops the instant packets stop (isOnline → false).
+-- up, toggling at 0.5 Hz; stops the instant packets stop (isOnline → false).
 local HEARTBEAT_HALF = 100  -- 1 s on / 1 s off → 0.5 Hz (getTime units, 1/100 s)
 local function drawHeartbeat(ctx)
   if not core.isOnline(ctx) then return end
@@ -549,36 +552,33 @@ local function drawHeartbeat(ctx)
   lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, CRIT_COL)
 end
 
--- True when the FULL two-column layout fits the zone. Both checks are in absolute
--- pixels because the fonts do NOT scale with S (only positions do): each column
--- must be wide enough for its longest fixed (SMLSIZE) line, and the zone tall
--- enough for header + a MIDSIZE big number + the three sub-rows. Measuring the
--- real font metrics makes this self-tuning across screen sizes (a quarter page is
--- wider in pixels on an 800 px screen than a 480 px one) instead of a magic constant.
+-- True when the FULL two-column layout fits the zone. Checked in absolute pixels
+-- because fonts don't scale with S (only positions do): each column must fit its
+-- longest fixed (SMLSIZE) line, and the zone must be tall enough for header +
+-- MIDSIZE big number + three sub-rows. Using real font metrics keeps this
+-- self-tuning across screen sizes instead of a magic constant.
 local function connectedFitsFull(w, h)
   if fullColumns(w) < minColW() - TIER_TOL then return false end   -- same px slack as the height check
   local pad     = sx(4)
-  local _, hdrH = lcd.sizeText("0", SMLSIZE)
-  local _, bigH = lcd.sizeText("0", MIDSIZE)
-  local _, smlH = lcd.sizeText("0", SMLSIZE)
-  local _, valH = lcd.sizeText("0", 0)   -- value row uses the default font
+  local hdrH = fontH(SMLSIZE)
+  local bigH = fontH(MIDSIZE)
+  local smlH = fontH(SMLSIZE)
+  local valH = fontH(0)   -- value row uses the default font
   -- Mirror drawMetricBlock's uniform-gap stack: header, big number, caption, value,
   -- sub-line — each gap METRIC_GAP, each row at its real height (smlH/valH/MIDSIZE).
   local needH   = pad + hdrH + METRIC_GAP + bigH + METRIC_GAP + smlH + METRIC_GAP + valH + METRIC_GAP + smlH + pad
   return h >= needH - TIER_TOL
 end
 
--- Picks the tier by what fits the zone. FULL is used whenever its content fits;
--- the bar's WARN/CRIT labels and the time-left block degrade on their own inside
--- FULL when the height is tight, so a quarter page shows the same layout as a
--- full page, just with smaller fonts. Shorter/narrower zones fall back to the
--- compact MEDIUM/SMALL tiers.
+-- Picks the tier by what fits the zone. FULL is used whenever its content fits
+-- (its bar labels/time-left block degrade on their own when height is tight);
+-- shorter/narrower zones fall back to MEDIUM/SMALL.
 local function drawConnectedTile(ctx)
   local w, h = ctx.zone.w, ctx.zone.h
   local m    = connectedMetrics(ctx)
   -- MID only when its 5 SMLSIZE rows fit (pad=2, min pitch smlH-4); else SMALL.
   -- Constants must match drawConnectedMedium / drawConnectedSmall.
-  local _, smlH    = lcd.sizeText("0", SMLSIZE)
+  local smlH    = fontH(SMLSIZE)
   local fiveRowMin = 2 * 2 + smlH + 4 * (smlH - 4)
   if connectedFitsFull(w, h) then
     drawConnectedFull(w, h, m)
@@ -589,13 +589,17 @@ local function drawConnectedTile(ctx)
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- Message / text layout
+-- ---------------------------------------------------------------------------
+
 -- Message fonts, largest first: the default (STD) font when the lines fit, else
 -- SMLSIZE. Two discrete steps only, so the per-line height stays predictable.
 local MSG_FONT_STEPS = { 0, SMLSIZE }
 
 -- Fixed line height for a message font: its text height plus a small gap.
 local function msgLineH(flag)
-  local _, th = lcd.sizeText("0", flag)
+  local th = fontH(flag)
   return th + sx(2)
 end
 
@@ -606,17 +610,15 @@ local function pickMsgFont(lines, availW, availH)
     local lineH = msgLineH(flag)
     local fits  = #lines * lineH <= availH
     for _, t in ipairs(lines) do
-      if lcd.sizeText(t, flag) > availW then fits = false break end
+      if textW(t, flag) > availW then fits = false break end
     end
     if fits then return flag, lineH end
   end
   return SMLSIZE, msgLineH(SMLSIZE)
 end
 
--- Renders a list of strings as horizontally-centered lines, vertically centred in
--- the area BELOW `topY` so a reserved header band isn't overlapped. Clamped: on a
--- zone too short the text starts at topY rather than above it. `flag`/`lineH` set
--- the (fixed) font. Used by the error / informational tiles.
+-- Renders centred lines below `topY` (so a reserved header band isn't overlapped),
+-- clamped to start at topY on zones too short to centre. Used by the error/info tiles.
 local function drawCenteredLines(ctx, lines, topY, flag, lineH)
   local n = #lines
   if n == 0 then return end
@@ -629,31 +631,29 @@ local function drawCenteredLines(ctx, lines, topY, flag, lineH)
   end
 end
 
--- Status line with 0–3 trailing dots that build up slowly. The base text depends on
--- the link: "No Battery connected" while waiting for telemetry, "Calculate" once the
--- link is up and we're settling. The line is centred as if all three dots were
--- present and the dots are drawn left-fixed after the base text, so the base never
--- jitters as the dots appear.
+-- ---------------------------------------------------------------------------
+-- WAITING tile
+-- ---------------------------------------------------------------------------
+
+-- Status line with 0-3 trailing dots. Centred as if all three dots were present,
+-- with the dots drawn left-fixed after the base text so it never jitters.
 local WAIT_BASE     = "No Battery connected"
 local SETTLE_BASE   = "Calculating"
 local USB_BASE      = "USB connected"
 local DOT_INTERVAL  = 50   -- getTime units (1/100 s) per dot → ~2 s full cycle
 local function drawWaitingStatus(cx, y, base)
   local n      = math.floor(getTime() / DOT_INTERVAL) % 4   -- 0..3
-  local baseW  = lcd.sizeText(base, SMLSIZE)
-  local fullW  = lcd.sizeText(base .. "...", SMLSIZE)
+  local baseW  = textW(base, SMLSIZE)
+  local fullW  = textW(base .. "...", SMLSIZE)
   local startX = cx - math.floor(fullW / 2)
   dtext(startX, y, base, COLORS.muted, SMLSIZE)
   if n > 0 then dtext(startX + baseW, y, string.rep(".", n), COLORS.muted, SMLSIZE) end
 end
 
--- WAITING tile: a small branding splash — "LIPO-NANNY" in accent and the status
--- line. Shown for every idle/waiting state (true WAITING, the post-connect settle
--- window, the popup/flight-end timeouts). Degrades on short zones to a single
--- centered status line.
--- Title font sized to this fixed-width anchor instead of the shorter own title,
--- so the splash matches a same-sized neighbouring splash. Widen/narrow the count
--- to shrink/grow the title by a font step.
+-- WAITING tile: "LIPO-NANNY" brand splash plus a status line, shown for every
+-- idle/waiting state. Degrades on short zones to a single centered status line.
+-- Title font sized to this fixed-width anchor (not the shorter real title) so
+-- it stays consistent regardless of the actual status text length.
 local TITLE_SIZE_REF = string.rep("M", 8)
 
 local function drawWaitingTile(ctx)
@@ -661,9 +661,8 @@ local function drawWaitingTile(ctx)
   local pad    = sx(4)
   local title  = "LIPO-NANNY"
   local cx     = math.floor(w / 2)
-  -- "USB connected" when the link is up but no battery; "Calculating" while
-  -- genuinely online and settling; else "No Battery connected". The isOnline guard
-  -- stops a dropped link from lingering on "Calculating" through the ENDED grace.
+  -- The isOnline guard stops a dropped link from lingering on "Calculating"
+  -- through the ENDED grace window.
   local base
   if core.isUsbConnected(ctx) then
     base = USB_BASE
@@ -675,8 +674,8 @@ local function drawWaitingTile(ctx)
 
   -- Fit the anchor width, then render one font step smaller.
   local titleFlag = smallerFont(pickFont(TITLE_SIZE_REF, w * 0.95, math.floor(h * 0.5)))
-  local _, titleH = lcd.sizeText(title, titleFlag)
-  local _, subH = lcd.sizeText(base, SMLSIZE)
+  local titleH = fontH(titleFlag)
+  local subH = fontH(SMLSIZE)
   local gap     = sx(4)
   local avail   = h - 2 * pad
 
@@ -695,16 +694,19 @@ local function drawWaitingTile(ctx)
   end
 end
 
--- ENDED tile: summary of the just-finished flight. All SMLSIZE, top-down with a
--- fixed row pitch (smlH + sx(3), same as the battery-selection list). Rows drop by
--- priority when the height runs out (kept longest → dropped first): header, Used,
--- cycles, Last, then "Flight ended" (decorative), which drops first.
+-- ---------------------------------------------------------------------------
+-- ENDED tile
+-- ---------------------------------------------------------------------------
+
+-- ENDED tile: flight summary, all SMLSIZE, fixed row pitch. Rows drop by priority
+-- when height runs out: header, Used, cycles, Last, then "Flight ended" (decorative,
+-- drops first).
 local function drawEndedTile(ctx)
   local pad     = sx(4)
   local h       = ctx.zone.h
   local lf      = ctx.lastFlight or {}
   local label   = formatBatteryLabel(lf.profileName, lf.instances)
-  local _, smlH = lcd.sizeText("0", SMLSIZE)
+  local smlH = fontH(SMLSIZE)
   local rowH    = smlH + sx(3)
 
   -- Used X mAh (Y%) — Y% includes the start offset.
@@ -728,8 +730,8 @@ local function drawEndedTile(ctx)
     lastText = "Last: --.- V/cell"
   end
 
-  -- Total cycles of the flown pack(s). finalizeFlight already added this flight's +1
-  -- to the config, so just read the stored count. Parallel shows both, e.g. "(16, 8)".
+  -- Total cycles of the flown pack(s); finalizeFlight already incremented the stored
+  -- count. Parallel shows both, e.g. "(16, 8)".
   local cyclesStr = "--"
   if lf.instances and #lf.instances > 0 then
     local parts = {}
@@ -764,10 +766,13 @@ local function drawEndedTile(ctx)
 end
 
 
--- Stick-gesture control for the selection popup, polled every tick — works in the
--- normal tile without fullscreen, unlike key events. Elevator up/down moves the
--- cursor (one step per deflection, re-armed in the dead-zone); aileron held full-
--- right with elevator centred commits. Flip the signs if a direction feels inverted.
+-- ---------------------------------------------------------------------------
+-- Battery-selection popup
+-- ---------------------------------------------------------------------------
+
+-- Stick-gesture control for the selection popup, polled every tick (works without
+-- fullscreen, unlike key events). Elevator moves the cursor one step per deflection
+-- (re-armed in the dead-zone); aileron held full-right with elevator centred commits.
 local function pollSelectionSticks(ctx)
   if not ctx.pendingSelection then return end
 
@@ -832,7 +837,7 @@ local function drawSelectionPopup(ctx)
   dtext(math.floor(w / 2), pad, title, BRAND, CENTER + BOLD)
 
   local firstRow = pad + TH
-  local _, smlH  = lcd.sizeText("0", SMLSIZE)
+  local smlH  = fontH(SMLSIZE)
   local legendY  = h - pad - smlH          -- bottom line reserved for the SMLSIZE legend
 
   local list = core.activeSelectionList(ctx)
@@ -844,7 +849,7 @@ local function drawSelectionPopup(ctx)
   -- Rows in the small font so more entries fit and long names plus the "(Nc)"
   -- cycle count aren't clipped.
   local availW  = w - 2 * pad
-  local _, rowTextH = lcd.sizeText("0", SMLSIZE)
+  local rowTextH = fontH(SMLSIZE)
   local rowH = rowTextH + sx(3)
 
   local cursor  = ctx.popupCursor or 1
@@ -854,9 +859,8 @@ local function drawSelectionPopup(ctx)
   local listBottom = showLegend and legendY or (h - pad)
   local maxRows    = math.max(1, math.floor((listBottom - firstRow) / rowH))
 
-  -- Scrolling window: keep the cursor centred so neighbouring entries stay
-  -- visible (you can always tell there are more), the list scrolls underneath.
-  -- Clamped at both ends so no blank rows appear.
+  -- Scrolling window: keep the cursor centred so neighbouring entries stay visible,
+  -- clamped at both ends so no blank rows appear.
   local half  = math.floor((maxRows - 1) / 2)
   local start = cursor - half
   if start > #list - maxRows + 1 then start = #list - maxRows + 1 end
@@ -873,10 +877,9 @@ local function drawSelectionPopup(ctx)
 
   local y = firstRow
   for i = start, last do
-    -- Hold-to-confirm fill: a translucent brand-coloured bar grows left→right behind
-    -- the cursor row as the aileron is held, completing when the commit fires. Drawn
-    -- in BRAND so it matches the recoloured cursor text; the solid text over it stays
-    -- readable thanks to the reduced opacity.
+    -- Hold-to-confirm fill: translucent brand-coloured bar grows left→right behind
+    -- the cursor row as the aileron is held; the solid cursor text stays readable
+    -- thanks to the reduced opacity.
     if i == cursor and confirmProgress > 0 then
       lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), BRAND, CONFIRM_FILL_OPACITY)
     end
@@ -894,6 +897,10 @@ local function drawSelectionPopup(ctx)
     dtext(pad, legendY, "ele: up/dn  ail: hold >", COLORS.muted, SMLSIZE)
   end
 end
+
+-- ---------------------------------------------------------------------------
+-- Brand heading + error / info tiles
+-- ---------------------------------------------------------------------------
 
 -- Decorative googly eyes drawn beside the brand heading.
 local function drawMascotEyes(x, y, w, h)
@@ -922,21 +929,20 @@ end
 local function drawBrandHeading(ctx)
   local pad = sx(4)
   dtext(pad, pad, "LIPO-NANNY", BRAND, SMLSIZE)
-  local hw, hh = lcd.sizeText("LIPO-NANNY", SMLSIZE)
+  local hw, hh = textW("LIPO-NANNY", SMLSIZE), fontH(SMLSIZE)
   drawMascotEyes(pad + hw + sx(6), pad, sx(20), math.max(hh, sx(14)))
 end
 
 -- Height of the brand-heading band (top pad + the taller of text / mascot-eye
 -- height), so callers can reserve it before centring text beneath.
 local function headerBandH()
-  local _, hh = lcd.sizeText("LIPO-NANNY", SMLSIZE)
+  local hh = fontH(SMLSIZE)
   return sx(4) + math.max(hh, sx(14)) + sx(2)
 end
 
--- Trims `lines` to at most `maxLines`, keeping the first line (the problem) and
--- then filling from the END backward (the action hint), so a 3-line message on a
--- 2-line zone keeps "what's wrong" + "what to do" and drops the middle context
--- (e.g. the model name). Order is preserved; always returns at least one line.
+-- Trims `lines` to `maxLines`, keeping the first line (the problem) and filling
+-- from the end backward (the action hint), so middle context drops first. Order
+-- is preserved; always returns at least one line.
 local function fitLines(lines, maxLines)
   if #lines <= maxLines then return lines end
   if maxLines <= 1 then return { lines[1] } end
@@ -945,12 +951,9 @@ local function fitLines(lines, maxLines)
   return keep
 end
 
--- Brand heading with centred message lines below it. Reserves the header band so
--- the text never rides up into it; on a zone too short for both header and text
--- (even at the SMLSIZE floor), the heading is dropped and the message gets the
--- full zone. The message font scales between SMLSIZE and STD with the free space.
--- On a zone too short even for every message line, trailing context is dropped
--- (problem + action kept) so the essentials never spill off the tile.
+-- Brand heading with centred message lines below it. On a zone too short for both
+-- (even at SMLSIZE), the heading is dropped and the message gets the full zone.
+-- If even every line doesn't fit, trailing context is dropped (see fitLines).
 local function drawHeadedMessage(ctx, lines)
   local w, h   = ctx.zone.w, ctx.zone.h
   local availW = w - 2 * sx(4)
@@ -972,10 +975,14 @@ local function drawErrorTile(ctx, line1, line2)
   drawHeadedMessage(ctx, { line1, line2 })
 end
 
+-- ---------------------------------------------------------------------------
+-- Widget lifecycle (create / tick / draw / refresh)
+-- ---------------------------------------------------------------------------
+
 local function create(zone, options)
-  -- Logic state lives on the core context; the widget owns only its display zone,
-  -- options and the tick throttle / error-recovery counters. With core missing we
-  -- still return a usable ctx so refresh()/drawTile() can render the error tile.
+  -- Logic state lives on the core context; the widget owns only zone, options and
+  -- the tick/error counters. With core missing, still return a usable ctx so
+  -- drawTile() can render the error tile.
   local ctx = core and core.newContext() or {}
   ctx.zone = zone
   ctx.cfg  = options
@@ -989,7 +996,6 @@ local function create(zone, options)
 end
 
 local function update(ctx, options)
-  -- Called when the pilot changes the widget settings.
   ctx.cfg = options
 end
 
@@ -1010,12 +1016,11 @@ local function tickImpl(ctx)
   end
 end
 
--- Throttled, fault-tolerant wrapper. Called from BOTH background() and refresh():
--- EdgeTX only runs background() while the widget is off-screen, so refresh() must
--- drive it too or the visible tile freezes until a menu round-trip. Throttled to
--- TICK_INTERVAL (10 Hz) so the sample cadence is the same regardless of caller
--- (refresh ~20 Hz). tickImpl runs inside pcall: repeated failures flip the
--- widget into a terminal error state rather than crashing EdgeTX.
+-- Throttled, fault-tolerant wrapper called from both background() and refresh():
+-- EdgeTX only runs background() while off-screen, so refresh() must drive it too
+-- or the tile freezes on-screen. Throttled to TICK_INTERVAL regardless of caller.
+-- tickImpl runs inside pcall; repeated failures flip the widget into a terminal
+-- error state rather than crashing EdgeTX.
 local function tick(ctx)
   if not core or ctx.fatalError then return end
 
@@ -1099,9 +1104,8 @@ local function drawTile(ctx)
   if ctx.state == core.STATE_WAITING then
     drawWaitingTile(ctx)
   elseif ctx.state == core.STATE_CONNECTED then
-    -- Settle window: no resting voltage / battery yet. Reuse the waiting tile instead
-    -- of a CONNECTED tile full of "--" (cellMismatch + popup are handled above, so a
-    -- nil profile here always means "still settling"). Heartbeat still shows the link.
+    -- Settle window: reuse the waiting tile instead of a CONNECTED tile full of "--"
+    -- (cellMismatch/popup handled above, so nil profile here means "still settling").
     if ctx.selectedProfile then
       drawConnectedTile(ctx)
     else
@@ -1116,9 +1120,9 @@ end
 local function refresh(ctx, event, touchEvent)
   tick(ctx)  -- Drive logic in the foreground too (background() won't run then; see tick()).
 
-  -- Pick the palette for this frame from the "Theme" CHOICE option (1-based: Dark = 1,
-  -- Light = 2). refresh() is the only draw path and runs one instance at a time, so the
-  -- module-global palette is safe. Anything but 2 (incl. unset) falls back to Dark.
+  -- Pick the palette from the "Theme" CHOICE option (1 = Dark, 2 = Light; anything
+  -- else falls back to Dark). Module-global is safe since refresh() runs one
+  -- instance's draw at a time.
   COLORS = (ctx.cfg and ctx.cfg.Theme == 2) and LIGHT or DARK
 
   -- Brand/heading colour for this frame (after the palette so the "Default" fallback
@@ -1131,8 +1135,8 @@ local function refresh(ctx, event, touchEvent)
     pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLORS.panel)
   end
 
-  -- Optional milky overlay (Light theme only): pilot sets 0–5, ×3 → alpha 0..15
-  -- (0 = invisible). Drawn in a theme colour over the transparent Light background.
+  -- Optional milky overlay (Light theme only): pilot sets 0-5, ×3 → opacity 0..15
+  -- (0 = opaque, 15 = invisible). Drawn in a theme colour over the transparent background.
   local trans = ctx.cfg and ctx.cfg.Transparency or 0
   if COLORS.transparent and trans > 0 then
     pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * trans)
@@ -1141,17 +1145,19 @@ local function refresh(ctx, event, touchEvent)
   pcall(drawTile, ctx)
 end
 
+-- ---------------------------------------------------------------------------
+-- Widget registration
+-- ---------------------------------------------------------------------------
+
 return {
   name       = "Lipo Nanny",
   options    = {
-    -- Theme dropdown (CHOICE labels are a nested table; the value is the 1-based
-    -- index, so default 1 = "Dark"; needs EdgeTX 2.11+). Transparency = milky overlay
-    -- 0–5 (default 2), applied in the Light theme only (Dark stays solid black).
+    -- Theme dropdown (CHOICE value is the 1-based index; default 1 = "Dark";
+    -- needs EdgeTX 2.11+). Transparency: milky overlay 0-5, Light theme only.
     { "Theme", CHOICE, 1, { "Dark", "Light" } },
     { "Transparency", VALUE, 2, 0, 5 },
-    -- Brand/heading colour. Accent: 1 Default (per-palette green), 2 Theme
-    -- (COLOR_THEME_FOCUS), 3 Custom (AccentColor). AccentColor shows the native colour
-    -- picker; only used when Accent = Custom, default = the original Dark lime.
+    -- Brand/heading colour: 1 Default (palette green), 2 Theme (COLOR_THEME_FOCUS),
+    -- 3 Custom (AccentColor picker, default the original Dark lime).
     { "Accent", CHOICE, 1, { "Default", "Theme", "Custom" } },
     { "AccentColor", COLOR, lcd.RGB(124, 210, 48) },
   },

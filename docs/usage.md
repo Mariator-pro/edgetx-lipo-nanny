@@ -37,7 +37,9 @@ none clearly fit, or it's a parallel model) a `SELECT PACK` popup appears **righ
 in the widget tile**. You drive it with the **sticks**, no fullscreen or menu
 needed:
 
-![SELECT PACK popup inside the widget tile](img/select-pack.png)
+<p align="center">
+  <img src="img/select-pack.png" width="300" alt="SELECT PACK popup inside the widget tile">
+</p>
 
 - **Elevator up / down** moves the cursor through the list (each row shows the
   pack label and its cycle count, e.g. `6S 1300 #1 (12c)`).
@@ -53,7 +55,9 @@ candidate is taken automatically.
 
 ## What the tile shows in flight
 
-![Widget tile in flight, values annotated](img/widget-tile-annotated.png)
+<p align="center">
+  <img src="img/widget-tile-annotated.png" width="480" alt="Widget tile in flight, values annotated">
+</p>
 
 - **Pack label**: `name #N` for a single pack, or `#1+2` for a parallel pair.
 - **Remaining %**: the big number, driven by consumed mAh offset by the start
