@@ -932,9 +932,12 @@ local function warnHaptic(ctx, pulses)
   end
 end
 
--- Sound paths must be strings; anything else falls back so no garbage reaches playFile.
-local function strOr(v, fallback)
+-- Sound override: a string is a custom path, `false` means the user muted this
+-- warning (it stays silent), and anything else (nil / garbage) falls back to the
+-- bundled default so no junk ever reaches playFile.
+local function soundOr(v, fallback)
   if type(v) == "string" then return v end
+  if v == false then return false end
   return fallback
 end
 
@@ -948,14 +951,18 @@ local function evaluateWarnings(ctx)
 
   local sounds = (ctx.config and ctx.config.sounds) or {}
   local warn, crit = getThresholds(ctx)
+  -- A muted warning (sounds.x == false) skips playFile but still buzzes: the
+  -- haptic cue has its own on/off setting and is independent of the voice.
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
-    playFile(strOr(sounds.warn, WARN_SOUND))
+    local f = soundOr(sounds.warn, WARN_SOUND)
+    if f then playFile(f) end
     warnHaptic(ctx, 1)
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
-    playFile(strOr(sounds.crit, CRIT_SOUND))
+    local f = soundOr(sounds.crit, CRIT_SOUND)
+    if f then playFile(f) end
     warnHaptic(ctx, 2)
   end
 end

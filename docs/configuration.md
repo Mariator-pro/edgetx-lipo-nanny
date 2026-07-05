@@ -143,8 +143,8 @@ rows and two reset buttons.
 | Row / column / button | Notes |
 |---|---|
 | **Threshold** | The warning percentage. **Low** default **30 %**, **Critical** default **20 %** (both **1–99 %**). Saving is blocked unless **Low is above Critical**. Low is the first voice announcement, Critical the second. |
-| **Sound** | Which file plays for that warning: **Default** (the bundled `warn.wav` / `crit.wav`), or any custom `*.wav` you've dropped into `/SOUNDS/en/SCRIPTS/LIPONY/`. Pick it from the popup list. A selected file that later goes missing falls back to the default. |
-| **Play** | Plays the row's currently selected sound (and, when haptic is on, its matching buzz — one pulse for Low, two for Critical), so you can check it exists and the volume is up. |
+| **Sound** | Which file plays for that warning: **Off**, **Default** (the bundled `warn.wav` / `crit.wav`), or any custom `*.wav` you've dropped into `/SOUNDS/en/SCRIPTS/LIPONY/`. Pick it from the popup list. A selected file that later goes missing falls back to the default. **Off** silences **only that warning's voice** — if haptic feedback is on, the buzz still fires (voice and haptic are independent). |
+| **Play** | Plays the row's currently selected sound (and, when haptic is on, its matching buzz — one pulse for Low, two for Critical), so you can check it exists and the volume is up.
 | **Haptic feedback** | `On` / `Off` (default **Off**). When on, the radio buzzes alongside each voice warning. Has no effect on radios without a vibration motor. |
 | **Haptic strength** | `Soft` / `Normal` (default) / `Strong`, setting the pulse length. Only shown while **Haptic feedback** is on. |
 | **Reset settings** | Restores just the settings on this screen — thresholds, warning sounds and haptic — to their defaults. Batteries, models and all statistics are kept. |

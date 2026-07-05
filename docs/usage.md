@@ -88,10 +88,12 @@ thresholds:
 - Each fires **once** per flight (it won't nag repeatedly).
 - Which file plays is selectable **per warning** under **Settings → Sound** —
   `warn.wav` / `crit.wav` are just the defaults. Drop any named `*.wav` into
-  `/SOUNDS/en/SCRIPTS/LIPONY/` and pick it there.
+  `/SOUNDS/en/SCRIPTS/LIPONY/` and pick it there, or choose **Off** to silence
+  that warning's voice entirely.
 - **Optional haptic:** enable **Settings → Haptic feedback** and the radio also
   buzzes with each warning (one pulse for Low, two for Critical; strength
-  selectable). No effect on radios without a vibration motor.
+  selectable). No effect on radios without a vibration motor. The haptic is
+  independent of the voice: a warning set to **Off** still buzzes when haptic is on.
 - If you plug in a pack that is **already below the warn threshold**, the low
   announcement is suppressed (you knowingly started part used); the critical
   announcement stays armed.

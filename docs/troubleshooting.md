@@ -35,6 +35,7 @@ These are normal, not errors; the widget is waiting for something:
 ## Other issues
 
 **No voice warning?**
+- Check that the warning's **Sound** isn't set to **Off** in **Settings**
 - Check that the selected sound file exists in `/SOUNDS/en/SCRIPTS/LIPONY/`
   (the defaults are `warn.wav` / `crit.wav`).
 - Use the **Play** button next to each warning in **Settings** to confirm playback.

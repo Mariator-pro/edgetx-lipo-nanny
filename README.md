@@ -89,7 +89,7 @@ It solves three concrete problems:
                └── crit.wav     ← critical warning (e.g. "land now")
    ```
 
-   The WAV files are yours to supply; `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings**. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
+   The WAV files are yours to supply; `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings** — or set a warning to **Off** there to silence its voice. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
 
 2. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 
@@ -132,7 +132,7 @@ If something's off, the widget tile usually tells you what:
 | `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. |
 | `core.lua missing` | `SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. Add it next to `config.lua` and restart. |
 
-**No voice warning?** Check that `warn.wav` / `crit.wav` exist and the radio volume is up.
+**No voice warning?** Check the warning isn't set to **Off** in Settings, that `warn.wav` / `crit.wav` exist, and the radio volume is up.
 
 **Tool says "Save failed" on first run?** The data folder `/SCRIPTS/LIPONY/` is missing. Create it on the SD card (EdgeTX/Lua can't create folders itself), then retry.
 
