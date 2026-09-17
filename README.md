@@ -9,6 +9,7 @@ EdgeTX Lua script that tracks battery voltage and capacity, alerting the pilot b
 [![ExpressLRS](https://img.shields.io/badge/ExpressLRS-%E2%89%A5%203.0-orange)](https://www.expresslrs.org)
 [![GitHub issues](https://img.shields.io/github/issues/Mariator-pro/edgetx-lipo-nanny)](../../issues)
 [![GitHub last commit](https://img.shields.io/github/last-commit/Mariator-pro/edgetx-lipo-nanny)](../../commits/main)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-yellow?logo=buy-me-a-coffee&logoColor=white)](https://www.buymeacoffee.com/mariatorpro)
 
 ---
 
