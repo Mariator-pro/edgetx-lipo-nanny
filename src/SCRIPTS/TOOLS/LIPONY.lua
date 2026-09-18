@@ -39,7 +39,7 @@ if not core then
   return { run = run }
 end
 
-local VERSION        = "1.1.0"
+local VERSION        = "1.1.1"
 local SCHEMA_VERSION = core.SCHEMA_VERSION
 local PATHS = {
   config    = core.CONFIG_PATH,
@@ -1183,14 +1183,19 @@ local function genName(p)
   return mfr .. p.cells .. "s " .. p.chemistry .. " " .. p.capacityMah .. "mAh"
 end
 
--- Next free "bat_NNN" id.
+-- Next "bat_NNN" id, never reused: a counter persisted in the config (like nextPackId),
+-- floored to one above every id still present in the library OR referenced by a model
+-- (a stale reference left by an older version must not be handed to a new profile).
+-- Configs without the counter get it with the first new profile.
 local function nextBatteryId(cfg)
-  local maxN = 0
-  for _, b in ipairs(cfg.batteries) do
-    local n = tonumber(string.match(tostring(b.id or ""), "^bat_(%d+)$"))
-    if n and n > maxN then maxN = n end
+  local function num(id) return tonumber(string.match(tostring(id or ""), "^bat_(%d+)$")) or 0 end
+  local n = cfg.nextBatteryId or 1
+  for _, b in ipairs(cfg.batteries) do n = math.max(n, num(b.id) + 1) end
+  for _, m in pairs(cfg.models or {}) do
+    for _, id in ipairs(m.batteryIds or {}) do n = math.max(n, num(id) + 1) end
   end
-  return string.format("bat_%03d", maxN + 1)
+  cfg.nextBatteryId = n + 1
+  return string.format("bat_%03d", n)
 end
 
 -- Next free "pack_NNNN" id. A global, monotonically rising counter persisted in
@@ -1308,13 +1313,28 @@ local function copyInstances(src)
   return out
 end
 
+-- Low/Critical overrides come as a pair: once either is set, both are stored (the
+-- missing one at its current global value), so a later change of the global settings
+-- can never split them. Anything explicitly present is treated as intended and kept.
+-- Returns true if the profile was changed. Also run once over every profile at start
+-- (init), which migrates half-set profiles from older versions or hand edits.
+local function pinOverrides(p)
+  if p.warn_pct == nil and p.crit_pct == nil then return false end
+  local changed = false
+  if p.warn_pct == nil then p.warn_pct = S.cfg.defaults.warn_pct; changed = true end
+  if p.crit_pct == nil then p.crit_pct = S.cfg.defaults.crit_pct; changed = true end
+  return changed
+end
+
 local function copyProfile(src)
-  return { id = src.id, manufacturer = src.manufacturer or "", name = src.name or "",
-           nameAuto = src.nameAuto ~= false, chemistry = src.chemistry or CHEM_NAMES[1],
-           capacityMah = src.capacityMah or LIMITS.capacityMah.default,
-           cells = src.cells or LIMITS.cells.default,
-           warn_pct = src.warn_pct, crit_pct = src.crit_pct,
-           instances = copyInstances(src.instances) }
+  local p = { id = src.id, manufacturer = src.manufacturer or "", name = src.name or "",
+              nameAuto = src.nameAuto ~= false, chemistry = src.chemistry or CHEM_NAMES[1],
+              capacityMah = src.capacityMah or LIMITS.capacityMah.default,
+              cells = src.cells or LIMITS.cells.default,
+              warn_pct = src.warn_pct, crit_pct = src.crit_pct,
+              instances = copyInstances(src.instances) }
+  pinOverrides(p)
+  return p
 end
 
 local function instancesEqual(a, b)
@@ -1724,8 +1744,12 @@ local function adjustNumber(e)
     local cur = p[key] or def         -- nil sits on the default value
     if isNext(e) then cur = math.min(THRESHOLDS.max, cur + 1)
     elseif isPrev(e) then cur = math.max(THRESHOLDS.min, cur - 1) end
-    -- Landing back on the default value clears the override (shows "(default)").
-    if cur == def then p[key] = nil else p[key] = cur end
+    p[key] = cur
+    pinOverrides(p)                   -- the partner value is pinned alongside
+    -- Both back on their defaults clears the pair (shows "(default)" again).
+    if p.warn_pct == S.cfg.defaults.warn_pct and p.crit_pct == S.cfg.defaults.crit_pct then
+      p.warn_pct, p.crit_pct = nil, nil
+    end
   end
   if isEnter(e) then S.profEditing = nil end
 end
@@ -1822,6 +1846,14 @@ local function doDeleteProfile()
     if b.id == S.prof.id then
       table.remove(S.cfg.batteries, i)
       break
+    end
+  end
+  -- Drop the id from every model's assignment so no model keeps pointing at a
+  -- profile that no longer exists.
+  for _, m in pairs(S.cfg.models or {}) do
+    local ids = m.batteryIds or {}
+    for i = #ids, 1, -1 do
+      if ids[i] == S.prof.id then table.remove(ids, i) end
     end
   end
   withRetry(function() return Cfg.saveConfig(S.cfg) end, gotoBatteries)
@@ -2128,12 +2160,27 @@ local function finishModelSave()
 end
 
 -- Parallel invariant check, then write.
-local function proceedModelSave()
+local function checkParallelSave()
   if S.model.parallel and not parallelInvariantOk(S.cfg, S.model) then
     Nav.openAlert("Parallel mode needs a profile with 2+ packs")
     return
   end
   finishModelSave()
+end
+
+-- Parallel mode only allows profiles with 2+ packs. A profile with fewer may still be
+-- assigned from single mode (the assign list greys it out but keeps the tick), so
+-- unassign such profiles here, after confirmation, before the invariant check.
+local function proceedModelSave()
+  if not S.model.parallel then return finishModelSave() end
+  local kept, dropped = {}, 0
+  for _, id in ipairs(S.model.batteryIds) do
+    local p = profileById(S.cfg, id)
+    if p and #(p.instances or {}) < 2 then dropped = dropped + 1 else kept[#kept + 1] = id end
+  end
+  if dropped == 0 then return checkParallelSave() end
+  Nav.openDialog("Parallel mode unassigns " .. dropped .. " batteries with < 2 packs. Continue?",
+             function() S.model.batteryIds = kept; checkParallelSave() end)
 end
 
 local function saveModel()
@@ -2648,6 +2695,13 @@ local function init()
     S.screen = SCREEN.CONFIG_ERROR
   else
     S.screen = SCREEN.MAIN
+    -- Complete half-set Low/Critical overrides (see pinOverrides) and persist that once.
+    -- A failed write is not an error here: RAM is fixed, the next regular save carries it.
+    local changed = false
+    for _, b in ipairs(S.cfg.batteries or {}) do
+      if pinOverrides(b) then changed = true end
+    end
+    if changed then Cfg.saveConfig(S.cfg) end
   end
 end
 

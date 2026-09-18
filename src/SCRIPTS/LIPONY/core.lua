@@ -326,6 +326,7 @@ local function defaultConfig()
     schemaVersion = SCHEMA_VERSION,
     generation    = 0,
     nextPackId    = 1,
+    nextBatteryId = 1,
     defaults      = { warn_pct = THRESHOLDS.warn_pct, crit_pct = THRESHOLDS.crit_pct },
     batteries     = {},
     archive       = {},

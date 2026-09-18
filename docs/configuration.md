@@ -46,8 +46,8 @@ physical **packs** that you actually fly and that accumulate cycles.
 | **Cells** | Cell count (S), **1–30**. Must match the model's cell count to be assignable. |
 | **Packs** | Opens the Packs sub-page (see below). |
 | **Statistics** | Opens the read-only Statistics sub-page (see below): per-pack lifetime mAh, lowest cell voltage, and last-used date. |
-| **Low** | Per-profile **warn** override (**1–99 %**). Shows `… % (default)` until you set one; landing back on the default value clears the override. |
-| **Critical** | Per-profile **critical** override. Same range and default behaviour. |
+| **Low** | Per-profile **warn** override (**1–99 %**). Shows `… % (default)` until you set one. Low and Critical are overridden **as a pair**: as soon as you change one, the other is pinned at its current global value too, so later changes to the global Settings no longer affect this profile. Dialing both back onto the global values clears the pair. |
+| **Critical** | Per-profile **critical** override. Same range and pair behaviour. Saving is blocked unless Low is above Critical. |
 
 Buttons: **Save**, **Back**, **Delete** (existing profiles only), and **Reset
 name** (only while the name is a manual override).
@@ -110,7 +110,7 @@ appears in the bottom bar.
 | Field | Notes |
 |---|---|
 | **Cells** | The model's cell count (S). Only profiles with a matching cell count can be assigned. |
-| **Parallel packs** | `Yes` if you fly two packs in parallel (shown as `#1+2`), otherwise `No`. Requires at least one assigned profile (of the model's cell count) that has **two or more packs**; the tool blocks saving otherwise. You can assign several profiles. At flight time you pick the first pack, then the popup offers only **the same profile** (a different `#N`) for the second slot, so the two packs are always the same battery type. |
+| **Parallel packs** | `Yes` if you fly two packs in parallel (shown as `#1+2`), otherwise `No`. Requires at least one assigned profile (of the model's cell count) that has **two or more packs**; the tool blocks saving otherwise. You can assign several profiles. Switching to `Yes` with single-pack profiles still assigned asks to unassign them (parallel mode only works with profiles of two or more packs). At flight time you pick the first pack, then the popup offers only **the same profile** (a different `#N`) for the second slot, so the two packs are always the same battery type. |
 | **Batteries** | Opens the assignment page, where you tick the profiles that fit this model. Profiles with the wrong cell count (and, in parallel mode, those with fewer than two packs) are shown disabled. |
 | **Sensors** | `default` (CRSF/ELRS names) or `custom`. Opens the sensor-mapping page. |
 
@@ -152,7 +152,9 @@ rows and two reset buttons.
 | **Reset configuration** | Restores factory defaults; **all** batteries and models are erased. |
 
 Per-profile **Low/Critical** overrides (above) take precedence over these global
-threshold values for that profile.
+threshold values for that profile. Profiles from older versions that carry only one
+of the two values are completed automatically the first time the tool starts (the
+missing value is pinned at the global value in effect at that moment).
 
 > Changes you save in the tool are picked up by a running widget within a few
 > seconds (it re-reads `config.lua` on its own), so no radio restart is needed.
