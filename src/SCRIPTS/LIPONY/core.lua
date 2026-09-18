@@ -59,8 +59,9 @@ local DEFAULT_SENSOR_CURRENT  = DEFAULT_SENSORS.current
 local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
 local DEFAULT_SENSOR_LINK     = DEFAULT_SENSORS.link
 
--- Default voice files; config.sounds.warn/.crit may override them (missing files
--- play silently). Exported so the Tools-Script uses the same default paths.
+-- Default voice files; config.sounds.warn/.crit may override them (a missing
+-- custom file falls back to these). Exported so the Tools-Script uses the same
+-- default paths.
 local WARN_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/warn.wav"
 local CRIT_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/crit.wav"
 Core.WARN_SOUND = WARN_SOUND
@@ -933,11 +934,23 @@ local function warnHaptic(ctx, pulses)
   end
 end
 
--- Sound override: a string is a custom path, `false` means the user muted this
--- warning (it stays silent), and anything else (nil / garbage) falls back to the
--- bundled default so no junk ever reaches playFile.
+-- True unless fstat positively says the file is gone. fstat is absent on the
+-- desktop and pcall-guarded, so "unknown" keeps the custom path (no regression).
+local function soundFileExists(path)
+  if not fstat then return true end
+  local ok, info = pcall(fstat, path)
+  return not ok or info ~= nil
+end
+
+-- Sound override: a string is a custom path (dropped to the default when the
+-- file no longer exists on the card, so the warning still sounds), `false` means
+-- the user muted this warning (it stays silent), and anything else (nil /
+-- garbage) falls back to the bundled default so no junk ever reaches playFile.
 local function soundOr(v, fallback)
-  if type(v) == "string" then return v end
+  if type(v) == "string" then
+    if soundFileExists(v) then return v end
+    return fallback
+  end
   if v == false then return false end
   return fallback
 end
