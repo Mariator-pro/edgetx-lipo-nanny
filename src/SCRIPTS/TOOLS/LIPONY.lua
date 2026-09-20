@@ -39,7 +39,7 @@ if not core then
   return { run = run }
 end
 
-local VERSION        = "1.1.1"
+local VERSION        = core.VERSION
 local SCHEMA_VERSION = core.SCHEMA_VERSION
 local PATHS = {
   config    = core.CONFIG_PATH,

@@ -39,6 +39,7 @@ Core.STATE_ENDED     = STATE_ENDED
 
 local CONFIG_PATH          = "/SCRIPTS/LIPONY/config.lua"
 local SCHEMA_VERSION       = 1
+Core.VERSION        = "1.1.1"   -- single source: the tool's About page reads it from here
 Core.CONFIG_PATH    = CONFIG_PATH
 Core.SCHEMA_VERSION = SCHEMA_VERSION
 
