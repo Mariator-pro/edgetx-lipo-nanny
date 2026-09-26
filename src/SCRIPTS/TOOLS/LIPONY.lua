@@ -297,7 +297,7 @@ local SX = { id = COL1, cyc = math.floor(LCD_W * 0.13), mah = math.floor(LCD_W *
 local function drawHeader(title)
   local h = LINE + PAD
   lcd.drawFilledRectangle(0, 0, LCD_W, h, COLOR_THEME_SECONDARY1)
-  local _, th = lcd.sizeText("Mg")            -- font height; vertically centre the title
+  local _, th = lcd.sizeText("Mg", BOLD)      -- bold title height; vertically centre it
   lcd.drawText(PAD, math.floor((h - th) / 2), title, COLOR_THEME_PRIMARY2 + BOLD)
 end
 
@@ -610,8 +610,8 @@ end
 
 -- Rows the box shows: capped by the max, the list, and what fits the screen.
 local function pickerRows()
-  local _, th  = lcd.sizeText("Mg")
-  local maxFit = math.floor((LCD_H - 2 * LINE - th - 2 * PAD) / LINE)
+  local _, hh  = lcd.sizeText("Mg", BOLD)     -- bold header
+  local maxFit = math.floor((LCD_H - 2 * LINE - hh - 2 * PAD) / LINE)
   return math.max(1, math.min(PICK.rows, #S.picker.labels, maxFit))
 end
 
@@ -620,7 +620,8 @@ function Screen.drawPicker()
   local n     = #p.labels
   local rows  = pickerRows()
   local _, th = lcd.sizeText("Mg")
-  local headH = th + 6
+  local _, hh = lcd.sizeText("Mg", BOLD)      -- the title is bold
+  local headH = hh + 6
   local w     = math.floor(LCD_W * 0.58)
   local h     = headH + rows * LINE + 4
   local x     = math.floor((LCD_W - w) / 2)
