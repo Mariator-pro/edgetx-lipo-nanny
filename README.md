@@ -52,7 +52,7 @@ It solves three concrete problems:
 
 - At connect, the script reads the resting voltage, auto-selects the matching battery from a per-model library (or lets you pick when several fit), and estimates the starting state-of-charge from a chemistry-specific voltage curve (LiPo, LiPoHV, LiIon).
 - During flight, the FC-reported consumed-mAh counter (CRSF `Capa` by default) is offset by the start SoC, so remaining capacity reflects reality from the first second.
-- **Telemetry-system agnostic:** the four sensors (voltage, current, consumed mAh, link) default to the CRSF/ELRS names but are remappable **per model** in the tool, so FrSky S.Port and other systems work too.
+- **Telemetry-system agnostic:** the three sensors (voltage, current, consumed mAh) default to the CRSF/ELRS names but are remappable **per model** in the tool, so FrSky S.Port and other systems work too. The link state comes from the radio itself and needs no mapping.
 - Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable. An optional **haptic buzz** (one pulse on warn, two on critical) can accompany them.
 - Per physical **pack** (#1, #2, …) the script keeps a **cycle count** plus read-only **statistics** (lifetime consumed mAh, lowest cell voltage seen, and the last-used date), all viewable per profile in the tool.
 - Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired. An optional **purchase date** per pack helps track battery age.
@@ -64,7 +64,7 @@ It solves three concrete problems:
 - A radio running EdgeTX 2.11 or newer (color-display models only)
   > `v2.11` is a hard minimum: the widget's **Theme** selector uses a `CHOICE` widget option that EdgeTX only supports from 2.11 onward.
 - A receiver that reports battery telemetry: at minimum **voltage** and **consumed mAh**
-  > ExpressLRS ≥ 3.0 works out of the box (default sensor names `RxBt`/`Curr`/`Capa`/`RQly`). Other systems (e.g. FrSky S.Port with `VFAS`/`Cur`/`mAh`/`RSSI`) are supported by remapping the sensors **per model** in the tool. `v3.0.0` is the earliest ELRS version verified on hardware.
+  > ExpressLRS ≥ 3.0 works out of the box (default sensor names `RxBt`/`Curr`/`Capa`). Other systems (e.g. FrSky S.Port with `VFAS`/`Cur`/`mAh`) are supported by remapping the sensors **per model** in the tool. `v3.0.0` is the earliest ELRS version verified on hardware.
 
 ---
 
@@ -97,7 +97,7 @@ It solves three concrete problems:
 3. **Create your configuration**: open **Tools → Lipo Nanny** and set up:
    - at least one **battery profile** (manufacturer, chemistry, capacity, cell count, packs)
    - the **model settings** for the active model (cell count, single vs. parallel, assigned batteries)
-   - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the four sensors at your system's telemetry names
+   - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the three sensors at your system's telemetry names
    - *(optional)* the global **Settings** (warn / critical thresholds, per-warning sounds, haptic feedback)
 
 4. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.

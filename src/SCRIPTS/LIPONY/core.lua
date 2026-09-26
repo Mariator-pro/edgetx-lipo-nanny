@@ -44,6 +44,7 @@ Core.CONFIG_PATH    = CONFIG_PATH
 Core.SCHEMA_VERSION = SCHEMA_VERSION
 
 local CONFIG_POLL_INTERVAL  = 500  -- 5 s in hundredths of a second (getTime())
+local SENSOR_CHECK_INTERVAL = 100  -- 1 s; sensor existence is model config, 1 s cache is plenty
 local ENDED_TIMEOUT         = 150   -- 1.5 s without online signal → ENDED
 local ENDED_DISPLAY_TIMEOUT = 3000 -- 30 s in ENDED without reconnect → back to WAITING
 local TIME_LEFT_INTERVAL    = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
@@ -53,12 +54,11 @@ local SETTLE_DELAY          = 300  -- 3 s after CONNECTED before sampling restin
 -- Default telemetry sensor names (CRSF/ELRS standard). A model may override these
 -- per the config's sensors block. The Tools-Script reads this to keep the stored
 -- config sparse (only names that differ are written) and to label the picker.
-local DEFAULT_SENSORS = { voltage = "RxBt", current = "Curr", capacity = "Capa", link = "RQly" }
+local DEFAULT_SENSORS = { voltage = "RxBt", current = "Curr", capacity = "Capa" }
 Core.DEFAULT_SENSORS = DEFAULT_SENSORS
 local DEFAULT_SENSOR_VOLTAGE  = DEFAULT_SENSORS.voltage
 local DEFAULT_SENSOR_CURRENT  = DEFAULT_SENSORS.current
 local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
-local DEFAULT_SENSOR_LINK     = DEFAULT_SENSORS.link
 
 -- Default voice files; config.sounds.warn/.crit may override them (a missing
 -- custom file falls back to these). Exported so the Tools-Script uses the same
@@ -349,11 +349,38 @@ local function safeGetValue(name)
   return 0
 end
 
--- getValue returns 0 both for a missing sensor and a genuine zero, so existence
--- needs getFieldInfo (nil when the sensor is not configured in the model).
+-- getFieldInfo is nil for a sensor that was never discovered; getValue would give 0.
 local function sensorExists(name)
   local ok, info = pcall(getFieldInfo, name)
   return ok and info ~= nil
+end
+
+-- Existence per sensor, re-checked at most every `interval` (same unit as `now`).
+-- names = { key = "SensorName", ... }; returns the cached { key = true/false }.
+local function sensorsPresent(state, names, now, interval)
+  if state.sensorCheckAt == nil or now - state.sensorCheckAt >= interval then
+    state.sensorCheckAt = now
+    local has = {}
+    for key, name in pairs(names) do has[key] = sensorExists(name) end
+    state.sensorsPresent = has
+  end
+  return state.sensorsPresent
+end
+
+-- True while EdgeTX receives telemetry (any protocol).
+local function linkUp()
+  return getRSSI() ~= 0
+end
+
+-- Debounced loss: true once the link has been down for `grace` (same unit as `now`).
+-- state.linkLostSince is nil while the link is up.
+local function linkLost(state, up, now, grace)
+  if up then
+    state.linkLostSince = nil
+    return false
+  end
+  state.linkLostSince = state.linkLostSince or now
+  return now - state.linkLostSince >= grace
 end
 
 local function modelFilename()
@@ -374,35 +401,33 @@ local function activeModelName()
 end
 
 -- Records which telemetry sensors the model actually has, so the widget can show a
--- clear "Sensor missing" hint instead of computing on absent values. Setup changes
--- rarely, so re-checked at the config-poll cadence (first tick checks immediately:
--- lastSensorCheck starts at 0).
+-- clear "Sensor missing" hint instead of computing on absent values.
 local function checkSensors(ctx)
-  local now = getTime()
-  if ctx.lastSensorCheck ~= 0 and (now - ctx.lastSensorCheck) < CONFIG_POLL_INTERVAL then
-    return
+  local names = ctx.sensorNames
+  if names.voltage ~= ctx.sensorVoltage or names.current ~= ctx.sensorCurrent
+     or names.capacity ~= ctx.sensorCapacity then
+    -- Remapped in the config: new names table, re-check at once.
+    names = { voltage = ctx.sensorVoltage, current = ctx.sensorCurrent, capacity = ctx.sensorCapacity }
+    ctx.sensorNames   = names
+    ctx.sensorCheckAt = nil
   end
-  ctx.lastSensorCheck = now
-  ctx.hasRxBt = sensorExists(ctx.sensorVoltage)
-  ctx.hasCurr = sensorExists(ctx.sensorCurrent)
-  ctx.hasCapa = sensorExists(ctx.sensorCapacity)
+  local has = sensorsPresent(ctx, names, getTime(), SENSOR_CHECK_INTERVAL)
+  ctx.hasRxBt, ctx.hasCurr, ctx.hasCapa = has.voltage, has.current, has.capacity
 end
 
--- Reads the four sensors, applies plausibility filters and keeps the last valid
--- value on ctx (invalid samples dropped). Voltage validation needs ctx.cells;
--- rawVoltage is always kept for the online fallback.
+-- Reads the three sensors and the link state, applies plausibility filters and
+-- keeps the last valid value on ctx (invalid samples dropped). Voltage validation
+-- needs ctx.cells.
 local function readTelemetry(ctx)
   local v = safeGetValue(ctx.sensorVoltage)
   local i = safeGetValue(ctx.sensorCurrent)
   local q = safeGetValue(ctx.sensorCapacity)
-  local l = safeGetValue(ctx.sensorLink)
-
-  ctx.linkQuality = l
-  ctx.rawVoltage  = v
+  local link = linkUp()
+  ctx.linkUp = link
 
   -- FC on USB (no battery): link live but voltage, current and capacity all zero.
   -- All three never glitch to zero at once, so no debounce is needed.
-  ctx.noBatterySignal = l > 0 and v == 0 and i == 0 and q == 0
+  ctx.noBatterySignal = link and v == 0 and i == 0 and q == 0
 
   -- Voltage: [0.5 V × cells … 5 V × cells]
   local cells = ctx.cells
@@ -438,7 +463,6 @@ local function syncModelConfig(ctx)
   ctx.sensorVoltage  = DEFAULT_SENSOR_VOLTAGE
   ctx.sensorCurrent  = DEFAULT_SENSOR_CURRENT
   ctx.sensorCapacity = DEFAULT_SENSOR_CAPACITY
-  ctx.sensorLink     = DEFAULT_SENSOR_LINK
 
   if not ctx.config or not ctx.config.models then return end
   local filename = modelFilename()
@@ -454,7 +478,6 @@ local function syncModelConfig(ctx)
     if s.voltage  and s.voltage  ~= "" then ctx.sensorVoltage  = s.voltage  end
     if s.current  and s.current  ~= "" then ctx.sensorCurrent  = s.current  end
     if s.capacity and s.capacity ~= "" then ctx.sensorCapacity = s.capacity end
-    if s.link     and s.link     ~= "" then ctx.sensorLink     = s.link     end
   end
   if not modelCfg.batteryIds or #modelCfg.batteryIds == 0 then
     ctx.modelError = "no_batteries"
@@ -491,10 +514,8 @@ local function pollConfig(ctx)
   syncModelConfig(ctx)
 end
 
--- Online detection: primary RQly > 0, fallback RxBt > 0 (used when
--- the RQly sensor is not configured — getValue returns 0 in that case).
 local function isOnline(ctx)
-  return ctx.linkQuality > 0 or ctx.rawVoltage > 0
+  return ctx.linkUp
 end
 
 -- Settle window elapsed, link live, but no battery ever reported → FC on USB.
@@ -639,22 +660,21 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Drives the WAITING/CONNECTED/ENDED state machine. Must run after
--- readTelemetry so that link-status / rawVoltage reflect the latest sample.
+-- readTelemetry so that the link state reflects the latest sample.
 local function updateStateMachine(ctx)
   local now = getTime()
   local online = isOnline(ctx)
+  local lost   = linkLost(ctx, online, now, ENDED_TIMEOUT)
 
   if ctx.state == STATE_WAITING then
     if online then
       ctx.state              = STATE_CONNECTED
       ctx.connectedSinceTime = now
-      ctx.lastTelemetryTime  = now
       resetFlightState(ctx)
     end
 
   elseif ctx.state == STATE_CONNECTED then
     if online then
-      ctx.lastTelemetryTime = now
       -- Resting voltage: captured once, SETTLE_DELAY after connect, so the reading
       -- is taken at idle rather than under load. Basis for battery detection.
       if ctx.restVoltage == nil and ctx.voltage
@@ -672,7 +692,7 @@ local function updateStateMachine(ctx)
         local vCell = ctx.voltage / ctx.cells
         if not ctx.minVCell or vCell < ctx.minVCell then ctx.minVCell = vCell end
       end
-    elseif (now - ctx.lastTelemetryTime) >= ENDED_TIMEOUT then
+    elseif lost then
       if ctx.selectedProfile then
         captureFlightSummary(ctx)
         finalizeFlight(ctx)   -- cycle-counter evaluation + statistics write
@@ -692,7 +712,6 @@ local function updateStateMachine(ctx)
       -- Battery change (lost link, then reconnect).
       ctx.state              = STATE_CONNECTED
       ctx.connectedSinceTime = now
-      ctx.lastTelemetryTime  = now
       resetFlightState(ctx)
     elseif (now - ctx.endedTime) >= ENDED_DISPLAY_TIMEOUT then
       -- Flight-summary shown long enough with no reconnect → idle again.
@@ -1070,6 +1089,28 @@ local function autoSelectSlot(ctx)
 end
 
 -- ---------------------------------------------------------------------------
+-- Per-tick pipeline
+-- ---------------------------------------------------------------------------
+
+-- One data-processing cycle (no lcd.*), the single entry point every consumer
+-- drives. Bails out early on a config error or a missing required sensor so it
+-- never computes on absent values. Returns true when the connected branch ran,
+-- so the caller knows when to poll its own selection input.
+local function tick(ctx)
+  pollConfig(ctx)
+  if ctx.configError then return false end
+  checkSensors(ctx)
+  if not ctx.hasRxBt or not ctx.hasCapa then return false end  -- required sensors absent
+  readTelemetry(ctx)
+  updateStateMachine(ctx)
+  if ctx.state ~= STATE_CONNECTED then return false end
+  detectBattery(ctx)        -- auto-select for 1 candidate; else sets pendingSelection
+  evaluateWarnings(ctx)
+  refreshTimeLeft(ctx)      -- snapshot the displayed time-left every 2 s
+  return true
+end
+
+-- ---------------------------------------------------------------------------
 -- Context factory
 -- ---------------------------------------------------------------------------
 
@@ -1080,7 +1121,7 @@ local function newContext()
   return {
     -- State machine
     state = STATE_WAITING,
-    lastTelemetryTime = 0,
+    linkLostSince     = nil,
     connectedSinceTime = 0,
     endedTime = 0,
 
@@ -1096,13 +1137,11 @@ local function newContext()
     pendingBumps = {},
     pendingStats = {},
 
-    -- Telemetry — last valid values. rawVoltage = latest unvalidated RxBt,
-    -- used as online fallback when RQly is missing.
+    -- Telemetry — last valid values.
     voltage     = nil,
-    rawVoltage  = 0,
     current     = nil,
     capacity    = nil,
-    linkQuality = 0,
+    linkUp      = false,
     noBatterySignal = false,
 
     -- Sensor existence (assume present until checkSensors proves otherwise, so
@@ -1110,7 +1149,8 @@ local function newContext()
     hasRxBt = true,
     hasCurr = true,
     hasCapa = true,
-    lastSensorCheck = 0,
+    sensorCheckAt = nil,
+    sensorNames   = {},
 
     cellMismatch = false,
 
@@ -1168,7 +1208,8 @@ Core.cyclesFor            = cyclesFor
 Core.modelFilename        = modelFilename
 Core.activeModelName      = activeModelName
 
--- Per-tick pipeline the widget drives
+-- Per-tick pipeline: consumers call tick(); the steps stay exported for tests
+Core.tick                 = tick
 Core.pollConfig           = pollConfig
 Core.checkSensors         = checkSensors
 Core.readTelemetry        = readTelemetry

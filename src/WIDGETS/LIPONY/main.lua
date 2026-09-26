@@ -999,21 +999,10 @@ local function update(ctx, options)
   ctx.cfg = options
 end
 
--- One data-processing cycle (no lcd.*). Bails out early on a config error or a
--- missing required sensor so it never computes on absent values.
+-- One data-processing cycle (no lcd.*): the core pipeline, then stick navigation
+-- while a selection popup is open.
 local function tickImpl(ctx)
-  core.pollConfig(ctx)
-  if ctx.configError then return end
-  core.checkSensors(ctx)
-  if not ctx.hasRxBt or not ctx.hasCapa then return end  -- required sensors absent
-  core.readTelemetry(ctx)
-  core.updateStateMachine(ctx)
-  if ctx.state == core.STATE_CONNECTED then
-    core.detectBattery(ctx)        -- auto-select for 1 candidate; else sets pendingSelection
-    pollSelectionSticks(ctx)  -- stick navigation while a selection popup is open
-    core.evaluateWarnings(ctx)
-    core.refreshTimeLeft(ctx)      -- snapshot the displayed time-left every 2 s
-  end
+  if core.tick(ctx) then pollSelectionSticks(ctx) end
 end
 
 -- Throttled, fault-tolerant wrapper called from both background() and refresh():

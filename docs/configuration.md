@@ -118,17 +118,17 @@ Buttons: **Save**, **Back**, and **Delete** (existing model configs only).
 
 ### Sensors (per model)
 
-Only needed if you don't use ELRS/CRSF. Four telemetry sources are mapped:
+Only needed if you don't use ELRS/CRSF. Three telemetry sources are mapped:
 
 | Sensor | Default name | Used for |
 |---|---|---|
 | **Voltage** | `RxBt` | Resting voltage → start SoC, and the live V/cell readout. |
 | **Current** | `Curr` | Live current draw. |
 | **Capacity** | `Capa` | Consumed mAh, the main remaining-% driver. |
-| **Link** | `RQly` | Link/connection state. |
 
 Point each one at your system's telemetry name (e.g. FrSky S.Port:
-`VFAS` / `Cur` / `mAh` / `RSSI`). **Reset to CRSF defaults** (shown only when a
+`VFAS` / `Cur` / `mAh`). The link state needs no mapping, it comes from the
+radio itself for every telemetry system. **Reset to CRSF defaults** (shown only when a
 custom mapping is set) restores the default names. The mapping is saved together
 with the model.
 

@@ -188,9 +188,6 @@ local SENSOR_FIELDS = {
   { key = "capacity", label = "Capacity", desc = {
       "Consumed mAh, counts UP from 0 (not %).",
       "Main warn trigger. 1300mAh pack: 0->1300." } },
-  { key = "link",     label = "Link", desc = {
-      "Link/signal quality for online detect.",
-      "Any value >0 = receiving. e.g. RQly, RSSI." } },
 }
 local TEXT_MAX = { mfr = 10, name = 30 }   -- manufacturer / profile-name char caps
 
@@ -2359,9 +2356,10 @@ local function sensorsResetShown()
   return S.modelIsActive and sensorsAreCustom(S.model.sensors)
 end
 
--- Cursor span: four field rows, then Back (+ the optional Reset button).
+-- Cursor span: the field rows, then Back (+ the optional Reset button).
+local SENSOR_BACK = #SENSOR_FIELDS + 1
 local function sensorItemCount()
-  return 5 + (sensorsResetShown() and 1 or 0)
+  return SENSOR_BACK + (sensorsResetShown() and 1 or 0)
 end
 
 local function sensorOptIndex(v)
@@ -2383,7 +2381,7 @@ function Screen.drawSensors()
   local _, smH  = lcd.sizeText("Mg", SMLSIZE)
   local smPitch = smH + 4
 
-  -- Four sensor field rows at normal size.
+  -- Sensor field rows at normal size.
   local y = bodyY(1)
   for i, f in ipairs(SENSOR_FIELDS) do
     drawFieldRowY(y, f.label, sensorRowValue(f.key), {
@@ -2411,7 +2409,7 @@ function Screen.drawSensors()
   end
 
   local actions = sensorsResetShown() and { "Back", "Reset to CRSF defaults" } or { "Back" }
-  drawButtonBar(actions, 5, S.sensorCursor)
+  drawButtonBar(actions, SENSOR_BACK, S.sensorCursor)
 end
 
 -- Picker for field index `c`: option 1 is the CRSF default (stored as nil), the
@@ -2428,13 +2426,13 @@ function Screen.handleSensors(e)
   S.sensorCursor = moveCursor(S.sensorCursor, e, sensorItemCount())
   if isEnter(e) then
     local c = S.sensorCursor
-    if c <= 4 then
+    if c < SENSOR_BACK then
       if S.modelIsActive then Nav.openSensorPicker(c) end
-    elseif c == 5 then
+    elseif c == SENSOR_BACK then
       leaveSensors()                         -- Back
-    elseif sensorsResetShown() and c == 6 then
+    elseif sensorsResetShown() and c == SENSOR_BACK + 1 then
       S.model.sensors = {}                   -- Reset to CRSF defaults
-      S.sensorCursor  = 5                     -- Reset row just vanished; focus Back
+      S.sensorCursor  = SENSOR_BACK          -- Reset row just vanished; focus Back
     end
   elseif isExit(e) then
     leaveSensors()
