@@ -1176,8 +1176,11 @@ end
 -- never computes on absent values. Returns true when the connected branch ran,
 -- so the caller knows when to poll its own selection input.
 local function tick(ctx)
+  local saving = ctx.saveJob ~= nil
   stepSave(ctx)             -- first: a config error or missing sensor must not stall it
-  pollConfig(ctx)
+  -- The save re-reads the file itself and sets ctx.config; polling during it (or
+  -- in its write tick) only costs instructions.
+  if not saving then pollConfig(ctx) end
   if ctx.configError then return false end
   checkSensors(ctx)
   if not ctx.hasRxBt or not ctx.hasCapa then return false end  -- required sensors absent
