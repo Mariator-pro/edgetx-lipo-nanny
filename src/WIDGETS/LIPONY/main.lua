@@ -831,6 +831,50 @@ local function pollSelectionSticks(ctx)
   end
 end
 
+-- Popup name marquee: a name too long for its row scrolls by one character per
+-- MARQUEE_STEP, pausing MARQUEE_PAUSE steps at the start and the end. Scrolling by
+-- whole characters (not pixels) because a widget can't clip text to a row.
+local MARQUEE_STEP  = 30   -- 0.3 s (getTime units)
+local MARQUEE_PAUSE = 3
+
+-- True for a UTF-8 continuation byte (never the start of a character).
+local function isContByte(s, i)
+  local b = string.byte(s, i)
+  return b ~= nil and b >= 128 and b < 192
+end
+
+-- Longest part of `s` from byte `first` on that fits `maxW` in SMLSIZE, never
+-- ending inside a multi-byte character. Binary search: ~log2(#s) measurements.
+local function fitFrom(s, first, maxW)
+  local lo, hi = first - 1, #s   -- sub(first, lo) fits, sub(first, hi + 1) is past the end
+  if lcd.sizeText(string.sub(s, first), SMLSIZE) <= maxW then return string.sub(s, first) end
+  while hi - lo > 1 do
+    local mid = math.floor((lo + hi) / 2)
+    if lcd.sizeText(string.sub(s, first, mid), SMLSIZE) <= maxW then lo = mid else hi = mid end
+  end
+  while lo >= first and isContByte(s, lo + 1) do lo = lo - 1 end
+  return string.sub(s, first, lo)
+end
+
+-- The part of `name` to show at time `t` (getTime units since the row got the cursor).
+local function marqueeText(name, maxW, t)
+  if lcd.sizeText(name, SMLSIZE) <= maxW then return name end
+  local starts = {}
+  for i = 1, #name do
+    if not isContByte(name, i) then starts[#starts + 1] = i end
+  end
+  -- Scroll steps: the first start whose tail fits ends the run (binary search).
+  local lo, hi = 1, #starts
+  while lo < hi do
+    local mid = math.floor((lo + hi) / 2)
+    if lcd.sizeText(string.sub(name, starts[mid]), SMLSIZE) <= maxW then hi = mid else lo = mid + 1 end
+  end
+  local steps = lo - 1
+  local pos = math.floor(t / MARQUEE_STEP) % (steps + 2 * MARQUEE_PAUSE) - MARQUEE_PAUSE
+  if pos < 0 then pos = 0 elseif pos > steps then pos = steps end
+  return fitFrom(name, starts[pos + 1], maxW)
+end
+
 -- Renders the selection popup inside the widget zone (the traditional widget API
 -- cannot draw outside its zone; on a full-screen widget this fills the screen).
 local function drawSelectionPopup(ctx)
@@ -863,6 +907,11 @@ local function drawSelectionPopup(ctx)
   local rowH = rowTextH + sx(3)
 
   local cursor  = ctx.popupCursor or 1
+  -- The marquee starts over whenever another row (or slot) gets the cursor.
+  local marqueeKey = (ctx.popupSlot or 1) .. ":" .. cursor
+  if ctx.marqueeKey ~= marqueeKey then
+    ctx.marqueeKey, ctx.marqueeSince = marqueeKey, getTime()
+  end
   -- Drop the legend when keeping it would leave room for only one battery row; that
   -- space then goes to the list instead.
   local showLegend = math.floor((legendY - firstRow) / rowH) >= 2
@@ -893,11 +942,20 @@ local function drawSelectionPopup(ctx)
     if i == cursor and confirmProgress > 0 then
       lcd.drawFilledRectangle(pad, y, math.floor(availW * confirmProgress), rowH - sx(1), BRAND, CONFIRM_FILL_OPACITY)
     end
+    -- "#N (Xc)" always stays whole; only the name gives way: the cursor row
+    -- scrolls it, the others show as much of it as fits.
     local item   = list[i]
-    local row    = formatBatteryLabel(item.profile.name, { { pos = item.pos } })
-                   .. " (" .. (item.cycles or 0) .. "c)"
+    local name   = item.profile.name or "--"
+    local suffix = " #" .. tostring(item.pos) .. " (" .. (item.cycles or 0) .. "c)"
     local prefix = (i == cursor) and "> " or "  "
-    dtext(pad, y, prefix .. row, (i == cursor) and BRAND or COLORS.fg, SMLSIZE)
+    local nameW  = availW - textW(prefix, SMLSIZE) - textW(suffix, SMLSIZE)
+    local shown
+    if i == cursor then
+      shown = marqueeText(name, nameW, getTime() - ctx.marqueeSince)
+    else
+      shown = fitFrom(name, 1, nameW)
+    end
+    dtext(pad, y, prefix .. shown .. suffix, (i == cursor) and BRAND or COLORS.fg, SMLSIZE)
     y = y + rowH
   end
 
@@ -1046,6 +1104,9 @@ end
 -- Picks and draws the appropriate tile for the current state. Wrapped in pcall by
 -- refresh() so a rendering fault cannot crash EdgeTX either.
 local function drawTile(ctx)
+  -- Popup closed: the next popup's marquee starts at the name start.
+  if not ctx.pendingSelection then ctx.marqueeKey = nil end
+
   -- core.lua not installed / broken: same error-tile UI as every other problem.
   if not core then
     drawErrorTile(ctx, "core.lua missing", "Install on SD card")
