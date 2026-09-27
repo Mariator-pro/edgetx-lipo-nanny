@@ -53,7 +53,6 @@ local CONFIRM_FILL_OPACITY = 8
 -- wider screens (S = LCD_W/480).
 local REF_W = 480
 local S     = (LCD_W or REF_W) / REF_W
-local TH    = math.floor(18 * S + 0.5)  -- standard line height for default font
 local function sx(v) return math.floor(v * S + 0.5) end
 
 -- Slack on the FULL/MEDIUM height thresholds so a zone a pixel or two above a tier
@@ -307,7 +306,7 @@ local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLi
   local bigH = fontH(bigFlag)
   drawValueUnit(x, bigBottom - bigH, big, unit, bigColor, bigFlag, smallerFont(bigFlag))
   -- Caption / value / sub-line separated by one uniform gap, each placed at its
-  -- own measured height (not a fixed TH approximation, which drifts across screens).
+  -- own measured height (a fixed line height would drift across screens).
   local gap     = METRIC_GAP
   local capH = fontH(SMLSIZE)
   -- Value line is the only element in a real (non-SMLSIZE) font, so shrink it to
@@ -847,7 +846,7 @@ local function drawSelectionPopup(ctx)
   end
   dtext(math.floor(w / 2), pad, title, BRAND, CENTER + BOLD)
 
-  local firstRow = pad + TH
+  local firstRow = pad + fontH(BOLD) + sx(2)   -- below the bold title
   local smlH  = fontH(SMLSIZE)
   local legendY  = h - pad - smlH          -- bottom line reserved for the SMLSIZE legend
 
