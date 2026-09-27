@@ -28,7 +28,7 @@ These are normal, not errors; the widget is waiting for something:
 | `Model not configured` | The active model has no entry. Add it in **Tools → Lipo Nanny → Models** (use **[+] Add current model**). |
 | `No batteries assigned` | The model has no battery profile assigned. Open the model → **Batteries** and tick at least one matching profile. |
 | `Cell count mismatch` | No assigned profile matches the model's cell count. Fix the model's **Cells** value, or assign a profile with the right cell count. |
-| `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. If it persists, please [open an issue](../../issues). |
+| `Widget error` | An internal fault. Restart the radio. If it persists, please [open an issue](../../issues). |
 
 ---
 

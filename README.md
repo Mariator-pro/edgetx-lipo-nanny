@@ -130,7 +130,7 @@ If something's off, the widget tile usually tells you what:
 | `Model not configured` | The active model has no entry. Add it in **Tools → Lipo Nanny → Models**. |
 | `No batteries assigned` | Assign at least one matching battery profile to the model. |
 | `Cell count mismatch` | No assigned profile matches the model's cell count. |
-| `Widget error` | An internal fault. Remove and re-add the widget, or restart the radio. |
+| `Widget error` | An internal fault. Restart the radio. |
 | `core.lua missing` | `SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. Add it next to `config.lua` and restart. |
 
 **No voice warning?** Check the warning isn't set to **Off** in Settings, that `warn.wav` / `crit.wav` exist, and the radio volume is up.

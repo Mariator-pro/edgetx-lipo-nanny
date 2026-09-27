@@ -1055,7 +1055,7 @@ local function drawTile(ctx)
 
   -- Terminal error first — once set, nothing else is trustworthy.
   if ctx.fatalError then
-    drawErrorTile(ctx, "Widget error", "Re-add or restart")
+    drawErrorTile(ctx, "Widget error", "Restart radio")
     return
   end
 
