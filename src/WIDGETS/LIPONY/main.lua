@@ -728,7 +728,7 @@ local function drawEndedTile(ctx)
       local pct = math.floor(effectiveUsed / lf.effectiveCap * 100 + 0.5)
       pctStr = string.format(" (%d %%)", pct)
     end
-    usedText = string.format("Used %d mAh%s", lf.usedMah, pctStr)
+    usedText = string.format("Used %d mAh%s", math.floor(lf.usedMah + 0.5), pctStr)
   else
     usedText = "Used --"
   end
@@ -1204,7 +1204,10 @@ local function refresh(ctx, event, touchEvent)
     pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * (trans - 1))
   end
 
-  pcall(drawTile, ctx)
+  -- A drawing fault must not leave a blank tile without a hint.
+  if not pcall(drawTile, ctx) then
+    dtext(sx(4), sx(4), "Widget error", COLORS.muted, SMLSIZE)
+  end
 end
 
 -- ---------------------------------------------------------------------------
