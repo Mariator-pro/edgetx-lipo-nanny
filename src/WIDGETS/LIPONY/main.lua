@@ -132,12 +132,23 @@ local function fontH(flags)
   end
   return h
 end
+-- Width cache is capped: every new live value (distance, voltage ...) adds an
+-- entry, so it starts over once TEXT_W_MAX entries are stored.
+local TEXT_W_MAX = 200
+local textWCount = 0
 local function textW(text, flags)
   flags = flags or 0
   local byFlag = TEXT_W[flags]
   if not byFlag then byFlag = {}; TEXT_W[flags] = byFlag end
   local w = byFlag[text]
-  if not w then w = lcd.sizeText(text, flags); byFlag[text] = w end
+  if not w then
+    if textWCount >= TEXT_W_MAX then
+      TEXT_W, textWCount = {}, 0
+      byFlag = {}; TEXT_W[flags] = byFlag
+    end
+    w = lcd.sizeText(text, flags); byFlag[text] = w
+    textWCount = textWCount + 1
+  end
   return w
 end
 
@@ -1124,11 +1135,13 @@ local function refresh(ctx, event, touchEvent)
     pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLORS.panel)
   end
 
-  -- Optional milky overlay (Light theme only): pilot sets 0-5, ×3 → opacity 0..15
-  -- (0 = opaque, 15 = invisible). Drawn in a theme colour over the transparent background.
-  local trans = ctx.cfg and ctx.cfg.Transparency or 0
-  if COLORS.transparent and trans > 0 then
-    pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * trans)
+  -- Milky overlay (Light theme only): Transparency choice 1..6 = 0..100 % see-through
+  -- -> opacity 0..15 (15 = invisible); anything else (e.g. a pre-choice value) = default.
+  -- Drawn in a theme colour over the transparent background.
+  local trans = ctx.cfg and ctx.cfg.Transparency
+  if type(trans) ~= "number" or trans < 1 or trans > 6 then trans = 3 end
+  if COLORS.transparent and trans < 6 then
+    pcall(lcd.drawFilledRectangle, 0, 0, ctx.zone.w, ctx.zone.h, COLOR_THEME_PRIMARY2, 3 * (trans - 1))
   end
 
   pcall(drawTile, ctx)
@@ -1142,9 +1155,9 @@ return {
   name       = "Lipo Nanny",
   options    = {
     -- Theme dropdown (CHOICE value is the 1-based index; default 1 = "Dark";
-    -- needs EdgeTX 2.11+). Transparency: milky overlay 0-5, Light theme only.
+    -- needs EdgeTX 2.11+). Transparency: see-through share of the milky overlay, Light theme only.
     { "Theme", CHOICE, 1, { "Dark", "Light" } },
-    { "Transparency", VALUE, 2, 0, 5 },
+    { "Transparency", CHOICE, 3, { "0%", "20%", "40%", "60%", "80%", "100%" } },
     -- Brand/heading colour: 1 Default (palette green), 2 Theme (COLOR_THEME_FOCUS),
     -- 3 Custom (AccentColor picker, default the original Dark lime).
     { "Accent", CHOICE, 1, { "Default", "Theme", "Custom" } },

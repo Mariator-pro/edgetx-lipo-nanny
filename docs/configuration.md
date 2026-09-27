@@ -171,7 +171,7 @@ These are set in EdgeTX's own **widget settings** (long-press the widget /
 | Option | Values | Effect |
 |---|---|---|
 | **Theme** | `Dark` (default) / `Light` | **Dark** paints its own near-black panel so the tile looks identical on any radio theme. **Light** is transparent, so your radio theme shows through, with black text. |
-| **Transparency** | `0`–`5` (default `2`) | A milky overlay strength, applied **only in the Light theme** (`0` = none). Ignored in Dark. |
+| **Transparency** | `0%` to `100%` (default `40%`) | How much of the radio theme shows through the milky overlay, applied **only in the Light theme** (`0%` = opaque, `100%` = no overlay). Ignored in Dark. |
 | **Accent** | `Default` / `Theme` / `Custom` | Colour of the **heading / brand text only** — the `LIPO-NANNY` splash, error/info headings, the `● pack` label, and the selection-popup title/cursor. **Default** keeps the classic green (each theme its own shade). **Theme** uses your active EdgeTX theme's focus colour. **Custom** uses the **AccentColor** value below. The battery/state colours (bar, %, voltage, warn/crit) are **never** affected by this option. |
 | **AccentColor** | colour picker (default: the classic green) | The colour used when **Accent** = `Custom`. Opens EdgeTX's native colour picker; ignored for `Default` / `Theme`. |
 
