@@ -332,7 +332,11 @@ local function loadConfig()
   if not ok or not f then return nil, "missing" end
   pcall(io.close, f)
 
-  local pok, result = pcall(dofile, CONFIG_PATH)
+  -- Text only, no .luac: the radio would prefer a compiled copy with the same
+  -- 2 s FAT timestamp over a newer config.lua.
+  local cok, chunk, err = pcall(loadScript, CONFIG_PATH, "tx")
+  if not cok or not chunk then return nil, "parse", tostring(err or chunk) end
+  local pok, result = pcall(chunk)
   if not pok then return nil, "parse", tostring(result) end
   if type(result) ~= "table" then return nil, "parse", "not a table" end
   if result.schemaVersion ~= SCHEMA_VERSION then
