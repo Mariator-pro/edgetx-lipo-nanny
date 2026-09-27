@@ -33,6 +33,10 @@ EdgeTX Lua script that tracks battery voltage and capacity, alerting the pilot b
 | EdgeTX      | v2.11           | v2.12.0   | Radiomaster TX15, Radiomaster TX16S MK3    |
 | ExpressLRS  | v3.0.0          | v4.0.0    | Radiomaster RP1 V2, RP3 V2, RP4TD          |
 
+> Flight controllers (Betaflight, INAV, ArduPilot), other RC links (TBS Crossfire, ImmersionRC Ghost, FrSky ACCESS) and the settings they need: see [`docs/compatibility.md`](docs/compatibility.md).
+>
+> 🙋 **Help wanted:** most of these combinations are checked in the source code only, not yet on real hardware. If you fly one of them, a test would help a lot. Any feedback, working or not, is welcome: please [open an issue](../../issues).
+
 ---
 
 ## 🎯 What is it for?
@@ -63,8 +67,8 @@ It solves three concrete problems:
 
 - A radio running EdgeTX 2.11 or newer (color-display models only)
   > `v2.11` is a hard minimum: the widget's **Theme** selector uses a `CHOICE` widget option that EdgeTX only supports from 2.11 onward.
-- A receiver that reports battery telemetry: at minimum **voltage** and **consumed mAh**
-  > ExpressLRS ≥ 3.0 works out of the box (default sensor names `RxBt`/`Curr`/`Capa`). Other systems (e.g. FrSky S.Port with `VFAS`/`Cur`/`mAh`) are supported by remapping the sensors **per model** in the tool. `v3.0.0` is the earliest ELRS version verified on hardware.
+- A receiver that reports battery telemetry: at minimum **voltage** and **consumed mAh** (or the remaining percent)
+  > ExpressLRS ≥ 3.0 works out of the box (default sensor names `RxBt`/`Curr`/`Capa`). Other systems are supported by remapping the sensors **per model** in the tool, see [`docs/compatibility.md`](docs/compatibility.md). `v3.0.0` is the earliest ELRS version verified on hardware.
 
 ---
 

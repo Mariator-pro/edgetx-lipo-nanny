@@ -118,17 +118,26 @@ Buttons: **Save**, **Back**, and **Delete** (existing model configs only).
 
 ### Sensors (per model)
 
-Only needed if you don't use ELRS/CRSF. Three telemetry sources are mapped:
+Only needed if you don't use ELRS/CRSF. Three telemetry sources are mapped, plus the unit of the capacity sensor:
 
 | Sensor | Default name | Used for |
 |---|---|---|
 | **Voltage** | `RxBt` | Resting voltage → start SoC, and the live V/cell readout. |
 | **Current** | `Curr` | Live current draw. |
 | **Capacity** | `Capa` | Consumed mAh, the main remaining-% driver. |
+| **Capacity unit** | `mAh used` | Set to `% remaining` only if your FC sends the remaining percent instead of consumed mAh. |
 
-Point each one at your system's telemetry name (e.g. FrSky S.Port:
-`VFAS` / `Cur` / `mAh`). The link state needs no mapping, it comes from the
-radio itself for every telemetry system. **Reset to CRSF defaults** (shown only when a
+Point each one at your system's telemetry name. Which names and settings your
+flight controller and RC link need: see [`compatibility.md`](compatibility.md).
+The link state needs no mapping, it comes from the radio itself for every
+telemetry system.
+
+> **% remaining:** the script converts the percent into consumed mAh using the
+> capacity of the selected battery profile. This is only correct if the battery
+> capacity set in the flight controller is **exactly** the profile's capacity in
+> mAh (for parallel packs: the sum of both).
+
+**Reset to CRSF defaults** (shown only when a
 custom mapping is set) restores the default names. The mapping is saved together
 with the model.
 

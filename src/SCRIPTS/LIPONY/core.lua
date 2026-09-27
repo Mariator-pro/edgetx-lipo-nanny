@@ -39,7 +39,7 @@ Core.STATE_ENDED     = STATE_ENDED
 
 local CONFIG_PATH          = "/SCRIPTS/LIPONY/config.lua"
 local SCHEMA_VERSION       = 1
-Core.VERSION        = "1.1.1"   -- single source: the tool's About page reads it from here
+Core.VERSION        = "1.2.0"   -- single source: the tool's About page reads it from here
 Core.CONFIG_PATH    = CONFIG_PATH
 Core.SCHEMA_VERSION = SCHEMA_VERSION
 
@@ -480,6 +480,18 @@ local function readTelemetry(ctx)
     ctx.current = i
   end
 
+  -- Capacity sensor sending remaining % (e.g. ArduPilot over FrSky): convert to
+  -- consumed mAh against the nominal capacity of the selected pack(s), which the FC
+  -- must use as well. Needs a selection, so nothing latches before one is made.
+  if ctx.capacityPct then
+    local p, inst = ctx.selectedProfile, ctx.selectedInstances
+    if p and p.capacityMah and inst and q >= 0 and q <= 100 then
+      q = (100 - q) / 100 * p.capacityMah * #inst
+    else
+      q = -1
+    end
+  end
+
   -- Capacity (consumed mAh). After a dropout EdgeTX still reports the previous
   -- flight's high Capa until the new RX sends a fresh (zeroed) frame, so only start
   -- latching after the SETTLE_DELAY window — by then the stale value is gone. Then
@@ -503,6 +515,7 @@ local function syncModelConfig(ctx)
   ctx.sensorVoltage  = DEFAULT_SENSOR_VOLTAGE
   ctx.sensorCurrent  = DEFAULT_SENSOR_CURRENT
   ctx.sensorCapacity = DEFAULT_SENSOR_CAPACITY
+  ctx.capacityPct    = false
 
   if not ctx.config or not ctx.config.models then return end
   local filename = modelFilename()
@@ -518,6 +531,7 @@ local function syncModelConfig(ctx)
     if s.voltage  and s.voltage  ~= "" then ctx.sensorVoltage  = s.voltage  end
     if s.current  and s.current  ~= "" then ctx.sensorCurrent  = s.current  end
     if s.capacity and s.capacity ~= "" then ctx.sensorCapacity = s.capacity end
+    ctx.capacityPct = s.capacityUnit == "pct"
   end
   if not modelCfg.batteryIds or #modelCfg.batteryIds == 0 then
     ctx.modelError = "no_batteries"

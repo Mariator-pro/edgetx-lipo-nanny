@@ -186,8 +186,13 @@ local SENSOR_FIELDS = {
       "Live current draw (A). Feeds the",
       "remaining-time estimate. e.g. 0-120A." } },
   { key = "capacity", label = "Capacity", desc = {
-      "Consumed mAh, counts UP from 0 (not %).",
-      "Main warn trigger. 1300mAh pack: 0->1300." } },
+      "Consumed mAh, counts UP from 0 (or %,",
+      "see Capacity unit). Main warn trigger." } },
+  -- Not a sensor name: how the Capacity sensor reports (nil = mAh used, "pct").
+  { key = "capacityUnit", label = "Capacity unit",
+    unit = { "mAh used (default)", "% remaining" }, desc = {
+      "Only if the FC sends remaining %.",
+      "FC capacity must equal the pack's mAh." } },
 }
 local TEXT_MAX = { mfr = 10, name = 30 }   -- manufacturer / profile-name char caps
 
@@ -2332,9 +2337,9 @@ end
 -- ---------------------------------------------------------------------------
 -- Screen: per-model sensor mapping
 -- ---------------------------------------------------------------------------
--- Lets each model override the four CRSF sensor names. For the active model a picker
--- lists the live sensors (model.getSensor); a non-active model shows its stored names
--- read-only. S.sensorOpts is { false } .. <sensor names>, where the false sentinel
+-- Lets each model override the three CRSF sensor names and the capacity unit. For the
+-- active model a picker lists the live sensors (model.getSensor); a non-active model
+-- shows its stored names read-only. S.sensorOpts is { false } .. <sensor names>, where the false sentinel
 -- means "use the CRSF default" (stored as nil).
 
 function Nav.openSensors()
@@ -2345,10 +2350,11 @@ function Nav.openSensors()
   S.screen       = SCREEN.SENSORS
 end
 
-local function sensorRowValue(key)
-  local v = S.model.sensors[key]
+local function sensorRowValue(f)
+  local v = S.model.sensors[f.key]
+  if f.unit then return f.unit[v == "pct" and 2 or 1] end
   if v and v ~= "" then return v end
-  return DEFAULT_SENSORS[key] .. " (default)"
+  return DEFAULT_SENSORS[f.key] .. " (default)"
 end
 
 -- The "Reset to CRSF defaults" button only makes sense (and is only shown) when the
@@ -2385,7 +2391,7 @@ function Screen.drawSensors()
   -- Sensor field rows at normal size.
   local y = bodyY(1)
   for i, f in ipairs(SENSOR_FIELDS) do
-    drawFieldRowY(y, f.label, sensorRowValue(f.key), {
+    drawFieldRowY(y, f.label, sensorRowValue(f), {
       selected = S.sensorCursor == i,
       disabled = not S.modelIsActive,
       popup    = S.modelIsActive,
@@ -2414,9 +2420,15 @@ function Screen.drawSensors()
 end
 
 -- Picker for field index `c`: option 1 is the CRSF default (stored as nil), the
--- rest are the model's live sensor names.
+-- rest are the model's live sensor names. The unit row picks mAh (nil) or "pct".
 function Nav.openSensorPicker(c)
   local key    = SENSOR_FIELDS[c].key
+  local unit   = SENSOR_FIELDS[c].unit
+  if unit then
+    Nav.openPicker("Capacity unit", unit, S.model.sensors[key] == "pct" and 2 or 1,
+                   function(idx) S.model.sensors[key] = (idx == 2) and "pct" or nil end)
+    return
+  end
   local labels = { DEFAULT_SENSORS[key] .. " (default)" }
   for i = 2, #S.sensorOpts do labels[i] = S.sensorOpts[i] end
   Nav.openPicker(SENSOR_FIELDS[c].label .. " sensor", labels, sensorOptIndex(S.model.sensors[key]),
