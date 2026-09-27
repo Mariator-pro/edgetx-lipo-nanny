@@ -552,14 +552,19 @@ local function drawConnectedSmall(w, h, m)
   end
 end
 
--- Blinking red "receiving" dot in the top-right corner: shown while the link is
--- up, toggling at 0.5 Hz; stops the instant packets stop (isOnline → false).
-local HEARTBEAT_HALF = 100  -- 1 s on / 1 s off → 0.5 Hz (getTime units, 1/100 s)
+-- Pulsing red dot, top-right (fades in and out every 2 s); the caller draws it only
+-- while telemetry is arriving. drawFilledCircle has no opacity, so the colour is
+-- blended by hand between the background and red (light theme: white, the real
+-- background there depends on the radio theme).
+local HEARTBEAT_PERIOD = 200   -- getTime ticks
+local HEARTBEAT_RED    = { 220, 40, 40 }
+local HEARTBEAT_BG     = { dark = { 18, 20, 18 }, light = { 255, 255, 255 } }
 local function drawHeartbeat(ctx)
-  if not core.isOnline(ctx) then return end
-  if math.floor(getTime() / HEARTBEAT_HALF) % 2 ~= 0 then return end
+  local t  = 0.5 - 0.5 * math.cos(2 * math.pi * (getTime() % HEARTBEAT_PERIOD) / HEARTBEAT_PERIOD)
+  local bg = COLORS.transparent and HEARTBEAT_BG.light or HEARTBEAT_BG.dark
+  local function mix(i) return math.floor(bg[i] + (HEARTBEAT_RED[i] - bg[i]) * t + 0.5) end
   local r = sx(3)
-  lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, CRIT_COL)
+  lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, lcd.RGB(mix(1), mix(2), mix(3)))
 end
 
 -- True when the FULL two-column layout fits the zone. Checked in absolute pixels
@@ -1156,7 +1161,7 @@ local function drawTile(ctx)
   -- clears pendingSelection, so the next frame falls through to the live tile.
   if ctx.pendingSelection then
     drawSelectionPopup(ctx)
-    drawHeartbeat(ctx)   -- blink the telemetry dot here too (link is live during selection)
+    if core.isOnline(ctx) then drawHeartbeat(ctx) end   -- link is live during selection
     return
   end
 
@@ -1171,7 +1176,7 @@ local function drawTile(ctx)
     else
       drawWaitingTile(ctx)
     end
-    drawHeartbeat(ctx)
+    if core.isOnline(ctx) then drawHeartbeat(ctx) end
   elseif ctx.state == core.STATE_ENDED then
     drawEndedTile(ctx)
   end
