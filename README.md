@@ -56,10 +56,24 @@ It solves three concrete problems:
 
 - At connect, the script reads the resting voltage, auto-selects the matching battery from a per-model library (or lets you pick when several fit), and estimates the starting state-of-charge from a chemistry-specific voltage curve (LiPo, LiPoHV, LiIon).
 - During flight, the FC-reported consumed-mAh counter (CRSF `Capa` by default) is offset by the start SoC, so remaining capacity reflects reality from the first second.
-- **Telemetry-system agnostic:** the three sensors (voltage, current, consumed mAh) default to the CRSF/ELRS names but are remappable **per model** in the tool, so FrSky S.Port and other systems work too. The link state comes from the radio itself and needs no mapping.
 - Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable. An optional **haptic buzz** (one pulse on warn, two on critical) can accompany them.
 - Per physical **pack** (#1, #2, …) the script keeps a **cycle count** plus read-only **statistics** (lifetime consumed mAh, lowest cell voltage seen, and the last-used date), all viewable per profile in the tool.
 - Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired. An optional **purchase date** per pack helps track battery age.
+
+Besides the flight view above, the widget shows a page for each other phase of a flight:
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/widget-waiting.png" width="260" alt="Waiting page: no battery connected"></td>
+    <td align="center"><img src="docs/img/widget-preflight.png" width="260" alt="Preflight page with per-cell voltage, total voltage and pack status"></td>
+    <td align="center"><img src="docs/img/widget-end.png" width="260" alt="End page with used capacity, pack cycles, charge, last voltage and maximum current"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Waiting</b><br>no battery connected</td>
+    <td align="center"><b>Preflight</b><br>pack check before take-off</td>
+    <td align="center"><b>End</b><br>the flight's pack summary</td>
+  </tr>
+</table>
 
 ---
 
@@ -74,35 +88,34 @@ It solves three concrete problems:
 
 ## 📥 Installation
 
-1. **Copy the files onto the radio's SD card.** Copy everything below to the same locations. `core.lua` holds the shared logic and must sit next to the widget and tool — both load it at startup and show a "core.lua missing" hint if it isn't there. (Only `config.lua` is created automatically, on first save.)
+1. **Copy the files onto the radio's SD card.** Copy the folders below as a whole to the same locations, so files not listed here (like the Flight Bag icon) come along. `core.lua` holds the shared logic; the widget and Flight Bag load it at startup. Only `config.lua` is created automatically, on first save.
 
    ```
+   SCRIPTS/
+   ├── LIPONY/
+   │   ├── core.lua            ← shared logic
+   │   └── manifest.lua        ← Flight Bag settings
+   ├── FLIGHTBAG/              ← Flight Bag pages
+   └── TOOLS/
+       └── FLIGHTBAG.lua       ← Tools menu entry
    WIDGETS/
    └── LIPONY/
-       └── main.lua             ← telemetry widget (display)
-   SCRIPTS/
-   ├── TOOLS/
-   │   └── LIPONY.lua           ← configuration tool
-   └── LIPONY/
-       ├── core.lua             ← shared logic + config format (REQUIRED by both)
-       └── config.lua           ← written by the tool (created on first save)
+       └── main.lua            ← widget
    SOUNDS/
    └── en/
        └── SCRIPTS/
-           └── LIPONY/
-               ├── warn.wav     ← early warning    (e.g. "return to home")
-               └── crit.wav     ← critical warning (e.g. "land now")
+           └── LIPONY/         ← all .wav files
    ```
 
-   The WAV files are yours to supply; `warn.wav` / `crit.wav` are just the defaults. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Lipo Nanny → Settings** — or set a warning to **Off** there to silence its voice. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
+   `warn.wav` and `crit.wav` ship with the project as the default voices. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Flight Bag → Alerts**, or set a warning to **Off** there to silence its voice. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
 
 2. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 
-3. **Create your configuration**: open **Tools → Lipo Nanny** and set up:
+3. **Create your configuration**: open **Tools → Flight Bag** (tap the Lipo Nanny icon and press **Create** on first use) and set up:
    - at least one **battery profile** (manufacturer, chemistry, capacity, cell count, packs)
    - the **model settings** for the active model (cell count, single vs. parallel, assigned batteries)
    - *(only if you don't use ELRS/CRSF)* the **sensor mapping** under **Models → Sensors**: point the three sensors at your system's telemetry names
-   - *(optional)* the global **Settings** (warn / critical thresholds, per-warning sounds, haptic feedback)
+   - *(optional)* the global thresholds on **Warnings** and the per-warning sounds and vibration on **Alerts**
 
 4. **Place the widget**: add the **Lipo Nanny** widget to a telemetry screen. It only runs while it is placed on a page.
 
@@ -110,6 +123,8 @@ It solves three concrete problems:
    - **Theme**: `Dark` / `Light`.
    - **Transparency**: how much of the radio theme shows through the milky background (light theme only): `0%` opaque, `100%` no overlay.
    - **Accent**: color of the heading / brand text. `Default` (the classic green), `Theme` (the focus color of your active EdgeTX theme), or `Custom` (pick any color via **AccentColor**).
+
+> **Updating from an older version?** Flight Bag removes the old "Lipo Nanny" Tools entry on first start. If it still shows up, delete `/SCRIPTS/TOOLS/LIPONY.lua` by hand.
 
 > 📐 **Recommended screen layouts:** EdgeTX names its widget-screen layouts `columns × rows` (e.g. `2×4` = 2 columns next to each other, 4 rows on top of each other → 8 zones). The Lipo Nanny widget is designed for a **half-width** zone, so it looks best in the layouts with **2 columns**:
 >
@@ -123,25 +138,9 @@ It solves three concrete problems:
 
 ## 🛠️ Troubleshooting
 
-If something's off, the widget tile usually tells you what:
+If something's off, the widget tile usually names the problem. In most cases, **Tools → Flight Bag** shows a warning sign on the Lipo Nanny icon; tap it to see what is wrong.
 
-| Tile shows | Meaning / fix |
-|---|---|
-| `No Battery connected…` | No link / no battery yet. Power the model and check the ELRS connection. (`Calculating…` once the link is up, `USB connected` when on USB power.) |
-| `Sensor missing` | A required sensor (voltage or consumed-mAh, `RxBt`/`Capa` by default) isn't present. Run **Discover sensors** in EdgeTX telemetry, or remap the sensor names under **Tools → Lipo Nanny → Models → Sensors**. |
-| `Setup required` | No configuration yet. Open **Tools → Lipo Nanny** and create it. |
-| `Config invalid` | `config.lua` is corrupt or has the wrong schema version. Recreate it in the tool, or fix/delete it on the PC. |
-| `Model not configured` | The active model has no entry. Add it in **Tools → Lipo Nanny → Models**. |
-| `No batteries assigned` | Assign at least one matching battery profile to the model. |
-| `Cell count mismatch` | No assigned profile matches the model's cell count. |
-| `Widget error` | An internal fault. Restart the radio. |
-| `core.lua missing` | `SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. Add it next to `config.lua` and restart. |
-
-**No voice warning?** Check the warning isn't set to **Off** in Settings, that `warn.wav` / `crit.wav` exist, and the radio volume is up.
-
-**Tool says "Save failed" on first run?** The data folder `/SCRIPTS/LIPONY/` is missing. Create it on the SD card (EdgeTX/Lua can't create folders itself), then retry.
-
-> More cases and fixes: see [`docs/troubleshooting.md`](docs/troubleshooting.md).
+All tile and popup messages and their fixes: see [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ---
 
@@ -153,7 +152,7 @@ Found a bug, have an idea for an improvement, or running an FC firmware whose fl
 
 ## ⚠️ Disclaimer
 
-This script is provided **as is** and is intended as a pilot aid only. It monitors battery voltage and capacity reported via telemetry and raises audible/visual warnings when configurable thresholds are reached. It does **not** replace the pilot's own battery management, careful flight planning, or visual monitoring of the aircraft. Telemetry can be delayed, noisy, or temporarily lost (signal dropouts, sensor issues, incorrect cell-count detection), and the script cannot warn about conditions it does not see. Always land with a safe voltage and capacity reserve, treat the warnings as a backup, not a substitute, for your own judgement, and rely on the safety mechanisms of your transmitter, receiver and flight controller. Use at your own risk.
+This project is provided **as is** and is intended as an additional aid only. It does **not** replace your own battery management, your judgement, or the safety mechanisms of your transmitter, receiver and flight controller. Always land with a safe reserve. Use at your own risk.
 
 ---
 

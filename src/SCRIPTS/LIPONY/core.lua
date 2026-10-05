@@ -6,7 +6,7 @@
 -- Single source of truth used by BOTH scripts (must be installed alongside
 -- whichever is used):
 --   * the widget       /WIDGETS/LIPONY/main.lua       (display consumes this)
---   * the Tools-Script  /SCRIPTS/TOOLS/LIPONY.lua      (config editor)
+--   * the settings tool /SCRIPTS/TOOLS/FLIGHTBAG.lua  (config editor)
 -- =====================================================================
 -- SPDX-License-Identifier: GPL-2.0-only
 -- Copyright (C) 2026 Mariator-pro
@@ -26,29 +26,28 @@
 -- =====================================================================
 
 local Core = {}
+-- Single source of the version: the settings tool reads VERSION, API and
+-- CONFIG_PATH as text from the head of this file (keep them near the top).
+Core.VERSION = "2.0.0"
+Core.API     = { 1, 0 }
+Core.CONFIG_PATH = "/SCRIPTS/LIPONY/config.lua"
+-- API is the interface version for scripts that load this core: { breaking, additive }.
+-- Adding an exported function or field bumps the second number; changing or
+-- removing one bumps the first and resets the second. Fixes and internal
+-- changes leave it alone. A loader accepts the same first and at least its second.
 
 -- ---------------------------------------------------------------------------
 -- Constants
 -- ---------------------------------------------------------------------------
-local STATE_WAITING   = 1
-local STATE_CONNECTED = 2
-local STATE_ENDED     = 3
-Core.STATE_WAITING   = STATE_WAITING
-Core.STATE_CONNECTED = STATE_CONNECTED
-Core.STATE_ENDED     = STATE_ENDED
 
-local CONFIG_PATH          = "/SCRIPTS/LIPONY/config.lua"
+local CONFIG_PATH          = Core.CONFIG_PATH
 local SCHEMA_VERSION       = 1
-Core.VERSION        = "1.2.0"   -- single source: the tool's About page reads it from here
-Core.CONFIG_PATH    = CONFIG_PATH
 Core.SCHEMA_VERSION = SCHEMA_VERSION
 
 local CONFIG_POLL_INTERVAL  = 500  -- 5 s in hundredths of a second (getTime())
 local SENSOR_CHECK_INTERVAL = 100  -- 1 s; sensor existence is model config, 1 s cache is plenty
-local ENDED_TIMEOUT         = 150   -- 1.5 s without online signal → ENDED
-local ENDED_DISPLAY_TIMEOUT = 3000 -- 30 s in ENDED without reconnect → back to WAITING
 local TIME_LEFT_INTERVAL    = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
-local SETTLE_DELAY          = 300  -- 3 s after CONNECTED before sampling resting voltage and
+local SETTLE_DELAY          = 300  -- 3 s after PRE starts before sampling resting voltage and
                                    -- latching mAh — lets stale telemetry from the last flight clear
 
 -- Default telemetry sensor names (CRSF/ELRS standard). A model may override these
@@ -60,29 +59,36 @@ local DEFAULT_SENSOR_VOLTAGE  = DEFAULT_SENSORS.voltage
 local DEFAULT_SENSOR_CURRENT  = DEFAULT_SENSORS.current
 local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
 
--- Default voice files; config.sounds.warn/.crit may override them (a missing
--- custom file falls back to these). Exported so the Tools-Script uses the same
--- default paths.
-local WARN_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/warn.wav"
-local CRIT_SOUND = "/SOUNDS/en/SCRIPTS/LIPONY/crit.wav"
-Core.WARN_SOUND = WARN_SOUND
-Core.CRIT_SOUND = CRIT_SOUND
+-- Warning sounds. The config stores only a file name from SOUND_DIR under
+-- sounds.<key> (false = muted, absent = the default; a missing custom file
+-- falls back to the default).
+Core.SOUND_DIR      = "/SOUNDS/en/SCRIPTS/LIPONY/"
+Core.SOUND_KEYS     = { "warn", "crit" }
+Core.SOUND_DEFAULTS = { warn = "warn.wav", crit = "crit.wav" }
 
--- Optional haptic alongside the warning sounds, off by default. strength 1..3 maps to
--- a pulse length here (tune on the radio). Shared with the Tools-Script Test button.
-local HAPTIC = { min = 1, max = 3, default = 2,
-                 labels = { "Soft", "Normal", "Strong" }, dur = { 15, 30, 50 } }
-Core.HAPTIC = HAPTIC
-local HAPTIC_STRENGTH_MIN     = HAPTIC.min
-local HAPTIC_STRENGTH_MAX     = HAPTIC.max
-local HAPTIC_STRENGTH_DEFAULT = HAPTIC.default
-local HAPTIC_DUR              = HAPTIC.dur
+-- Optional haptic alongside the warning sounds, off by default: pulse length per
+-- strength tier (tune on the radio) and pulses per warning (critical buzzes twice).
+local HAPTIC_DUR = { [1] = 15, [2] = 30, [3] = 50 }
+Core.HAPTIC_DUR    = HAPTIC_DUR
+Core.HAPTIC_PULSES = { warn = 1, crit = 2 }
 
--- Warning thresholds (remaining-capacity %): single source for the factory
--- defaults and the editable range, read by defaultConfig(), getThresholds() and
--- the Tools-Script editor. warn must stay above crit.
-local THRESHOLDS = { warn_pct = 30, crit_pct = 20, min = 1, max = 99 }
-Core.THRESHOLDS = THRESHOLDS
+-- Editable ranges and factory defaults, keyed like the config: the single source
+-- for defaultConfig(), getThresholds(), normalizeConfig() and the settings tool.
+-- warnPct must stay above critPct (remaining-capacity %). cells, capacityMah and
+-- wear are the battery profile / model fields; one cell range for both, since
+-- profile.cells must match model.cells for battery detection.
+local LIMITS = {
+  warnPct        = { min = 1, max = 99, step = 1 },
+  critPct        = { min = 1, max = 99, step = 1 },
+  hapticStrength = { min = 1, max = 3,  step = 1 },
+  cells          = { min = 1, max = 30, step = 1 },
+  capacityMah    = { min = 10, max = 50000, step = 100 },
+  wear           = { min = 0, max = 50, step = 1 },
+}
+local DEFAULTS = { warnPct = 30, critPct = 20, audio = true, haptic = false, hapticStrength = 2,
+                   cells = 6, capacityMah = 1300 }
+Core.LIMITS   = LIMITS
+Core.DEFAULTS = DEFAULTS
 
 -- Battery chemistries. Per entry: chargeVoltage (100% SoC), dischargeVoltage
 -- (0% SoC), a descending SoC curve of {v_per_cell, soc%} pairs (5% steps) used by
@@ -324,10 +330,80 @@ local function writeFile(path, content)
   return wok == true
 end
 
+-- True unless fstat positively says the file is gone. fstat is absent on the
+-- desktop and pcall-guarded, so "unknown" keeps the custom name (no regression).
+local function soundFileExists(name)
+  if not fstat then return true end
+  local ok, info = pcall(fstat, Core.SOUND_DIR .. name)
+  return not ok or info ~= nil
+end
+
+-- Sound override: a string is a custom file name (an older full path is cut to its
+-- name; dropped to the default when the file no longer exists on the card, so the
+-- warning still sounds), `false` means the user muted this warning, and anything
+-- else (nil / garbage) is the default (nil) so no junk ever reaches playFile.
+local function soundOr(v)
+  if type(v) == "string" then
+    local name = string.match(v, "[^/]+$")
+    if name and soundFileExists(name) then return name end
+    return nil
+  end
+  if v == false then return false end
+  return nil
+end
+
+local function clampNum(n, lo, hi, fallback)
+  if type(n) ~= "number" then return fallback end
+  if n < lo then return lo elseif n > hi then return hi end
+  return n
+end
+
+-- Normalises a parsed config into a copy: settings clamped to LIMITS (wrong types
+-- fall back to DEFAULTS), sounds as file names, older layouts converted (defaults
+-- block and warn_pct / crit_pct become warnPct / critPct, also per profile, full
+-- sound paths become file names). Unknown entries are kept as they are, so a
+-- setting written by a newer version survives a save through this one. Profile
+-- overrides stay optional (nil = follow the general value).
+local function normalizeConfig(cfg)
+  local out = {}
+  if type(cfg) == "table" then for k, v in pairs(cfg) do out[k] = v end end
+  local old = type(out.defaults) == "table" and out.defaults or {}
+  if out.warnPct == nil then out.warnPct = old.warn_pct end
+  if out.critPct == nil then out.critPct = old.crit_pct end
+  out.defaults = nil
+  local L = LIMITS
+  out.warnPct        = clampNum(out.warnPct, L.warnPct.min, L.warnPct.max, DEFAULTS.warnPct)
+  out.critPct        = clampNum(out.critPct, L.critPct.min, L.critPct.max, DEFAULTS.critPct)
+  if type(out.audio) ~= "boolean" then out.audio = DEFAULTS.audio end
+  if type(out.haptic) ~= "boolean" then out.haptic = DEFAULTS.haptic end
+  out.hapticStrength = clampNum(out.hapticStrength, L.hapticStrength.min, L.hapticStrength.max,
+                                DEFAULTS.hapticStrength)
+  local snd, sounds = (type(out.sounds) == "table") and out.sounds or {}, {}
+  for k, v in pairs(snd) do sounds[k] = v end
+  for _, k in ipairs(Core.SOUND_KEYS) do sounds[k] = soundOr(snd[k]) end
+  out.sounds = sounds
+  -- Non-table battery entries (hand-edited file) are dropped instead of crashing later.
+  local bats = {}
+  for _, b in ipairs(type(out.batteries) == "table" and out.batteries or {}) do
+    if type(b) == "table" then
+      if b.warnPct == nil then b.warnPct = b.warn_pct end
+      if b.critPct == nil then b.critPct = b.crit_pct end
+      b.warn_pct, b.crit_pct = nil, nil
+      bats[#bats + 1] = b
+    end
+  end
+  out.batteries = bats
+  if type(out.archive) ~= "table" then out.archive = {} end
+  if type(out.models) ~= "table" then out.models = {} end
+  return out
+end
+
 -- Loads and validates the config file. Returns (configTable) on success, or
 -- (nil, errKind[, detail]) where errKind is "missing" | "parse" | "schema".
 -- The widget ignores `detail`; the Tools-Script surfaces it on the error screen.
-local function loadConfig()
+-- keepSounds: custom sound names stay even while the file is missing, so a
+-- flight-end save never drops them (playback falls back to the default).
+local function loadConfig(keepSounds)
   local ok, f = pcall(io.open, CONFIG_PATH, "r")
   if not ok or not f then return nil, "missing" end
   pcall(io.close, f)
@@ -345,9 +421,14 @@ local function loadConfig()
   if type(result.generation) ~= "number" then
     return nil, "schema", "generation"
   end
-  result.archive = result.archive or {}
-  result.sounds  = result.sounds or {}
-  return result
+  local cfg = normalizeConfig(result)
+  if keepSounds and type(result.sounds) == "table" then
+    for _, k in ipairs(Core.SOUND_KEYS) do
+      local v = result.sounds[k]
+      if type(v) == "string" then cfg.sounds[k] = string.match(v, "[^/]+$") end
+    end
+  end
+  return cfg
 end
 
 -- Increments the reload sentinel and writes the whole config back. The generation
@@ -369,12 +450,53 @@ local function defaultConfig()
     generation    = 0,
     nextPackId    = 1,
     nextBatteryId = 1,
-    defaults      = { warn_pct = THRESHOLDS.warn_pct, crit_pct = THRESHOLDS.crit_pct },
+    warnPct       = DEFAULTS.warnPct,
+    critPct       = DEFAULTS.critPct,
+    audio         = DEFAULTS.audio,
+    haptic        = DEFAULTS.haptic,
+    hapticStrength = DEFAULTS.hapticStrength,
     batteries     = {},
     archive       = {},
     sounds        = {},
     models        = {},
   }
+end
+
+-- Settings back to factory values (thresholds, sounds); batteries, models and
+-- statistics stay, and so do the shared settings (audio, haptic), which are set once for
+-- all scripts in the settings tool. Returns true on success; false without a readable
+-- config, so a damaged file is never overwritten.
+local function resetSettings()
+  local cfg = loadConfig()
+  if not cfg then return false end
+  cfg.warnPct, cfg.critPct, cfg.sounds = DEFAULTS.warnPct, DEFAULTS.critPct, {}
+  return saveConfig(cfg)
+end
+
+-- Zeroes every pack's cycle count and statistics and empties the archive;
+-- profiles and models stay. Returns true on success.
+local function resetStats()
+  local cfg = loadConfig()
+  if not cfg then return false end
+  for _, b in ipairs(cfg.batteries) do
+    for _, inst in ipairs(b.instances or {}) do
+      inst.cycles, inst.totalMah, inst.lastUsed, inst.minVCell = 0, 0, nil, nil
+    end
+  end
+  cfg.archive = {}
+  return saveConfig(cfg)
+end
+
+-- Everything erased (batteries, models, statistics, settings) except the shared
+-- settings. The pack-id counter safely restarts at 1: nothing survives that a
+-- fresh id could collide with. Returns true on success.
+local function factoryReset()
+  local cfg, fresh = loadConfig(), defaultConfig()
+  if cfg then
+    fresh.audio, fresh.haptic, fresh.hapticStrength = cfg.audio, cfg.haptic, cfg.hapticStrength
+    fresh.generation = cfg.generation
+  end
+  return saveConfig(fresh)
 end
 
 -- ---------------------------------------------------------------------------
@@ -423,6 +545,71 @@ local function linkLost(state, up, now, grace)
   return now - state.linkLostSince >= grace
 end
 
+-- Disarmed marker in the FM text: Betaflight appends * ! ?, ArduPilot *,
+-- INAV sends OK / WAIT / !ERR. "!FS!" (failsafe) is armed despite its "!".
+local INAV_DISARMED = { OK = true, WAIT = true, ["!ERR"] = true }
+local function fmDisarmed(fm)
+  if fm == "!FS!" then return false end
+  if INAV_DISARMED[fm] then return true end
+  local last = string.sub(fm, -1)
+  return last == "*" or last == "!" or last == "?"
+end
+
+-- armed, known. Known only once a disarmed marker was seen on this link
+-- (state.disarmSeen): some setups never send one, and a text without a marker
+-- alone proves nothing. Clear state.disarmSeen when the flight ends.
+local function armedFromFM(state, fm)
+  if type(fm) ~= "string" or fm == "" then return false, false end
+  if fmDisarmed(fm) then
+    state.disarmSeen = true
+    return false, true
+  end
+  if not state.disarmSeen then return false, false end
+  return true, true
+end
+
+-- Flight phases, word for word the same in every script. They pick the page:
+-- WAITING (no link) -> PRE (link up) -> FLIGHT (armed, or the app's preflight
+-- check met for PRE_HOLD_T without a break) -> ENDED (link lost LINK_LOSS_T)
+-- -> WAITING after ENDED_HOLD_T. No way back from FLIGHT to PRE (a disarm keeps
+-- FLIGHT). A loss in PRE goes straight to WAITING (no flight). A loss while
+-- armed is a link failure: back within ENDED_HOLD_T, the same flight goes on.
+-- Display only: logic that needs the real armed state reads armedFromFM.
+-- Times in ms. Returns the phase and an event: "new" (a new flight starts in
+-- PRE), "lost" (PRE -> WAITING), "end" (FLIGHT -> ENDED, s.linkFailure tells
+-- why), "resume" (link back after a failure) or "over" (ENDED_HOLD_T without
+-- link), else nil.
+local LINK_LOSS_T, ENDED_HOLD_T, PRE_HOLD_T = 1500, 30000, 15000
+local function flightPhase(s, up, armed, ready, now)
+  local phase, event = s.phase or "WAITING", nil
+  local lost = linkLost(s, up, now, LINK_LOSS_T)
+  if up then s.armedBeforeLoss = armed == true end
+  if phase == "WAITING" then
+    if up then phase, event = "PRE", "new" end
+  elseif phase == "ENDED" then
+    if up and s.linkFailure then
+      phase, event = "FLIGHT", "resume"
+    elseif up then
+      phase, event = "PRE", "new"
+    elseif now - s.endedAt >= ENDED_HOLD_T then
+      phase, event = "WAITING", "over"
+    end
+    if phase ~= "ENDED" then s.linkFailure = nil end
+  elseif phase == "FLIGHT" then
+    if lost then
+      phase, event, s.endedAt, s.linkFailure = "ENDED", "end", now, s.armedBeforeLoss
+    end
+  elseif lost then
+    phase, event = "WAITING", "lost"
+  elseif up then
+    if not ready then s.readySince = nil elseif not s.readySince then s.readySince = now end
+    if armed or (s.readySince and now - s.readySince >= PRE_HOLD_T) then phase = "FLIGHT" end
+  end
+  if phase ~= "PRE" then s.readySince = nil end
+  s.phase = phase
+  return phase, event
+end
+
 local function modelFilename()
   local ok, info = pcall(model.getInfo)
   if ok and type(info) == "table" then return info.filename end
@@ -455,6 +642,12 @@ local function checkSensors(ctx)
   ctx.hasRxBt, ctx.hasCurr, ctx.hasCapa = has.voltage, has.current, has.capacity
 end
 
+-- Link up and a flight going on or about to (phase PRE or FLIGHT).
+local function isActive(ctx)
+  return ctx.phase == "PRE" or ctx.phase == "FLIGHT"
+end
+
+
 -- Reads the three sensors and the link state, applies plausibility filters and
 -- keeps the last valid value on ctx (invalid samples dropped). Voltage validation
 -- needs ctx.cells.
@@ -464,6 +657,12 @@ local function readTelemetry(ctx)
   local q = safeGetValue(ctx.sensorCapacity)
   local link = linkUp()
   ctx.linkUp = link
+  if link then
+    -- Armed state from the CRSF flight mode text (true only when known armed),
+    -- for the flight phase.
+    local okFm, fm = pcall(getValue, "FM")
+    ctx.armed = armedFromFM(ctx, okFm and fm or nil)
+  end
 
   -- FC on USB (no battery): link live but voltage, current and capacity all zero.
   -- All three never glitch to zero at once, so no debounce is needed.
@@ -496,7 +695,7 @@ local function readTelemetry(ctx)
   -- flight's high Capa until the new RX sends a fresh (zeroed) frame, so only start
   -- latching after the SETTLE_DELAY window — by then the stale value is gone. Then
   -- monotonic up only.
-  if q >= 0 and ctx.state == STATE_CONNECTED
+  if q >= 0 and isActive(ctx)
      and (getTime() - ctx.connectedSinceTime) >= SETTLE_DELAY
      and (ctx.capacity == nil or q >= ctx.capacity) then
     ctx.capacity = q
@@ -575,7 +774,7 @@ end
 -- Settle window elapsed, link live, but no battery ever reported → FC on USB.
 -- Self-correcting: once a real pack reports, restVoltage is set and this is false.
 local function isUsbConnected(ctx)
-  return ctx.state == STATE_CONNECTED
+  return isActive(ctx)
          and ctx.restVoltage == nil
          and ctx.noBatterySignal
          and (getTime() - ctx.connectedSinceTime) >= SETTLE_DELAY
@@ -595,6 +794,9 @@ local function resetFlightState(ctx)
   ctx.timeLeftStamp       = nil
   ctx.restVoltage         = nil
   ctx.minVCell            = nil   -- lowest per-cell voltage seen this flight (statistics)
+  ctx.minVoltage          = nil   -- pack voltage and current extremes this flight, for
+  ctx.maxVoltage          = nil   -- scripts that load the core (not shown by the widget)
+  ctx.maxCurrent          = nil
   ctx.startSoc            = nil
   ctx.startOffsetMah      = nil
   ctx.selectedProfile     = nil
@@ -607,6 +809,8 @@ local function resetFlightState(ctx)
   ctx.confirmArmed        = false
   ctx.confirmSince        = nil
   ctx.cellMismatch        = false
+  ctx.bookedMah           = nil   -- per-pack mAh already saved this flight (link failure)
+  ctx.bookedCycle         = nil   -- packs already given their cycle this flight
 end
 
 -- Snapshot of the just-ended flight for the ENDED tile. Stores raw values;
@@ -674,7 +878,7 @@ end
 -- onto its instances and starts serializing it; stepSave() finishes over the next
 -- ticks. A bump for a vanished pack is dropped.
 local function startSave(ctx, bumps, stats)
-  local fresh = loadConfig()
+  local fresh = loadConfig(true)
   if not fresh then restorePending(ctx, bumps, stats); return end
   for _, b in ipairs(fresh.batteries or {}) do
     for _, inst in ipairs(b.instances or {}) do
@@ -725,27 +929,32 @@ local function stepSave(ctx)
   end
 end
 
--- Called once at the CONNECTED→ENDED transition: records a +1 cycle bump for each
+-- Called at every FLIGHT→ENDED transition (and a link loss in PRE): records a +1 cycle bump for each
 -- used pack that drew more than 10% of its capacity this flight (parallel splits the
 -- consumption evenly), records the per-pack statistics (consumed mAh, last-used date,
--- lowest cell voltage), then starts saving them to config.lua.
+-- lowest cell voltage), then starts saving them to config.lua. A flight resumed
+-- after a link failure ends again: only what was not saved yet is added.
 local function finalizeFlight(ctx)
   local profile   = ctx.selectedProfile
   local instances = ctx.selectedInstances
   if profile and profile.capacityMah and instances and #instances > 0 then
     -- The consumed mAh is split evenly across the used packs (50/50 in parallel).
     local perBattery = (ctx.capacity or 0) / #instances
+    local booked     = ctx.bookedMah or 0
+    ctx.bookedMah    = math.max(booked, perBattery)
+    ctx.bookedCycle  = ctx.bookedCycle or {}
     local dt   = getDateTime()
     local date = string.format("%04d-%02d-%02d", dt.year, dt.mon, dt.day)
     for _, inst in ipairs(instances) do
       if inst.id then
         local effCap = profile.capacityMah * (1 - (inst.wear or 0) / 100)
         -- Cycle: only when the pack drew more than 10% of ITS effective capacity.
-        if effCap > 0 and perBattery > 0.10 * effCap then
+        if effCap > 0 and perBattery > 0.10 * effCap and not ctx.bookedCycle[inst.id] then
           ctx.pendingBumps[inst.id] = (ctx.pendingBumps[inst.id] or 0) + 1
+          ctx.bookedCycle[inst.id]  = true
         end
         -- Statistics: recorded for every used pack, independent of the cycle threshold.
-        addPendingStats(ctx.pendingStats, inst.id, perBattery, date, ctx.minVCell)
+        addPendingStats(ctx.pendingStats, inst.id, math.max(0, perBattery - booked), date, ctx.minVCell)
       end
     end
   end
@@ -756,64 +965,54 @@ end
 -- Flight state machine
 -- ---------------------------------------------------------------------------
 
--- Drives the WAITING/CONNECTED/ENDED state machine. Must run after
--- readTelemetry so that the link state reflects the latest sample.
-local function updateStateMachine(ctx)
+-- Drives the flight phase (flightPhase) and what each phase does. Must run
+-- after readTelemetry so that the link state reflects the latest sample.
+-- ready: the preflight check is met (preflightMet, worked out by tick).
+local function updateStateMachine(ctx, ready)
   local now = getTime()
   local online = isOnline(ctx)
-  local lost   = linkLost(ctx, online, now, ENDED_TIMEOUT)
+  local _, event = flightPhase(ctx, online, ctx.armed, ready, now * 10)
+  if event == "new" then
+    ctx.connectedSinceTime = now
+    resetFlightState(ctx)
+  elseif event == "end" then
+    captureFlightSummary(ctx)
+    finalizeFlight(ctx)   -- cycle-counter evaluation + statistics save
+  elseif event == "lost" then
+    -- Link gone before the flight page: no summary, a chosen pack is saved as
+    -- before (without arming it draws far below a cycle). Clears the popup.
+    finalizeFlight(ctx)
+    resetFlightState(ctx)
+  end
+  if event == "lost" or event == "over" or (event == "end" and not ctx.linkFailure) then
+    ctx.disarmSeen = nil   -- flight over: new proof needed
+  end
 
-  if ctx.state == STATE_WAITING then
-    if online then
-      ctx.state              = STATE_CONNECTED
-      ctx.connectedSinceTime = now
-      resetFlightState(ctx)
+  if online and isActive(ctx) and event == nil then   -- not in the tick that starts or resumes
+    -- Resting voltage: captured once, SETTLE_DELAY after connect, so the reading
+    -- is taken at idle rather than under load. Basis for battery detection.
+    if ctx.restVoltage == nil and ctx.voltage
+       and (now - ctx.connectedSinceTime) >= SETTLE_DELAY then
+      ctx.restVoltage = ctx.voltage
     end
-
-  elseif ctx.state == STATE_CONNECTED then
-    if online then
-      -- Resting voltage: captured once, SETTLE_DELAY after connect, so the reading
-      -- is taken at idle rather than under load. Basis for battery detection.
-      if ctx.restVoltage == nil and ctx.voltage
-         and (now - ctx.connectedSinceTime) >= SETTLE_DELAY then
-        ctx.restVoltage = ctx.voltage
-      end
-      -- Average-current accumulator for time-left: one validated-current
-      -- sample per tick (10 Hz).
-      if ctx.current and ctx.current > 0 then
-        ctx.currentSumA        = ctx.currentSumA + ctx.current
-        ctx.currentSampleCount = ctx.currentSampleCount + 1
-      end
-      -- Lowest per-cell voltage this flight (statistics): tracked under load.
-      if ctx.voltage and ctx.cells and ctx.cells > 0 then
-        local vCell = ctx.voltage / ctx.cells
-        if not ctx.minVCell or vCell < ctx.minVCell then ctx.minVCell = vCell end
-      end
-    elseif lost then
-      if ctx.selectedProfile then
-        captureFlightSummary(ctx)
-        ctx.state     = STATE_ENDED   -- before finalizing, so a fault can't repeat it
-        ctx.endedTime = now
-        finalizeFlight(ctx)   -- cycle-counter evaluation + statistics save
-      else
-        -- Telemetry lost before a battery was chosen (settle window or selection
-        -- popup still open) → no flight happened, so clear the popup and go back to
-        -- idle instead of showing "Flight ended".
-        resetFlightState(ctx)
-        ctx.state = STATE_WAITING
-      end
+    -- Average-current accumulator for time-left: one validated-current
+    -- sample per tick (10 Hz).
+    if ctx.current and ctx.current > 0 then
+      ctx.currentSumA        = ctx.currentSumA + ctx.current
+      ctx.currentSampleCount = ctx.currentSampleCount + 1
     end
-
-  elseif ctx.state == STATE_ENDED then
-    if online then
-      -- Battery change (lost link, then reconnect).
-      ctx.state              = STATE_CONNECTED
-      ctx.connectedSinceTime = now
-      resetFlightState(ctx)
-    elseif (now - ctx.endedTime) >= ENDED_DISPLAY_TIMEOUT then
-      -- Flight-summary shown long enough with no reconnect → idle again.
-      ctx.state = STATE_WAITING
+    -- Lowest per-cell voltage this flight (statistics): tracked under load.
+    if ctx.voltage and ctx.cells and ctx.cells > 0 then
+      local vCell = ctx.voltage / ctx.cells
+      if not ctx.minVCell or vCell < ctx.minVCell then ctx.minVCell = vCell end
     end
+    -- Pack voltage and current extremes this flight (kept through ENDED).
+    local v, i = ctx.voltage, ctx.current
+    if v then
+      if not ctx.minVoltage or v < ctx.minVoltage then ctx.minVoltage = v end
+      if not ctx.maxVoltage or v > ctx.maxVoltage then ctx.maxVoltage = v end
+    end
+    if i and (not ctx.maxCurrent or i > ctx.maxCurrent) then ctx.maxCurrent = i end
   end
 end
 
@@ -823,24 +1022,30 @@ end
 
 -- Clamp a threshold into the editable range; a non-number falls back to `fallback`.
 local function clampPct(v, fallback)
-  if type(v) ~= "number" then return fallback end
-  if v < THRESHOLDS.min then return THRESHOLDS.min end
-  if v > THRESHOLDS.max then return THRESHOLDS.max end
-  return v
+  return clampNum(v, LIMITS.warnPct.min, LIMITS.warnPct.max, fallback)
 end
 
--- Returns (warn_pct, crit_pct): profile overrides win over the defaults, both
--- clamped and falling back to the factory THRESHOLDS.
+-- Returns (warnPct, critPct): profile overrides win over the general values, both
+-- clamped and falling back to the factory DEFAULTS.
 local function getThresholds(ctx)
-  local profile  = ctx.selectedProfile or {}
-  local defaults = (ctx.config and ctx.config.defaults) or {}
-  local warn = clampPct(profile.warn_pct or defaults.warn_pct, THRESHOLDS.warn_pct)
-  local crit = clampPct(profile.crit_pct or defaults.crit_pct, THRESHOLDS.crit_pct)
+  local profile = ctx.selectedProfile or {}
+  local cfg     = ctx.config or {}
+  local warn = clampPct(profile.warnPct or cfg.warnPct, DEFAULTS.warnPct)
+  local crit = clampPct(profile.critPct or cfg.critPct, DEFAULTS.critPct)
   return warn, crit
 end
 
 -- Effective total capacity in mAh: sum over the selected packs of
 -- profile.capacityMah × (1 − wear/100). Wear shrinks the usable capacity so the
+-- Preflight check of the battery from the remaining % and the thresholds:
+-- PACK READY (level 0), BATTERY LOW at the warning level (1) or the critical one
+-- (2). pct nil (not known yet in the first seconds) counts as full.
+local function preflight(pct, warn, crit)
+  pct = pct or 100
+  local level = (pct <= crit and 2) or (pct <= warn and 1) or 0
+  return { text = (level > 0) and "BATTERY LOW" or "PACK READY", level = level }
+end
+
 -- percentage and warnings track the aged battery; parallel naturally sums two
 -- packs (each with its own wear).
 local function effectiveCapacityMah(ctx)
@@ -852,6 +1057,20 @@ local function effectiveCapacityMah(ctx)
     total = total + profile.capacityMah * (1 - (inst.wear or 0) / 100)
   end
   return total
+end
+
+-- Level of the pack voltage from its per-cell voltage and the chemistry's
+-- thresholds: 0 OK, 1 warning, 2 critical; nil without a voltage, 0 when the
+-- chemistry or the cell count is unknown.
+local function voltageLevel(ctx)
+  if not ctx.voltage then return nil end
+  local profile = ctx.selectedProfile
+  local chem    = profile and CHEMISTRIES[profile.chemistry]
+  if not chem or not chem.voltageWarn or not ctx.cells or ctx.cells <= 0 then return 0 end
+  local vpc = ctx.voltage / ctx.cells
+  if vpc >= chem.voltageWarn then return 0 end
+  if vpc >= chem.voltageCrit then return 1 end
+  return 2
 end
 
 -- Remaining capacity in percent (0..100), or nil if uncalculable.
@@ -886,7 +1105,7 @@ local function calculateTimeLeftSeconds(ctx)
   return restMah / 1000 / avgCurrent * 3600  -- mAh → Ah → h → s
 end
 
--- "calc.." during the first 60 s after CONNECTED, "--:--" when the value is
+-- "calc.." during the first 60 s after PRE starts, "--:--" when the value is
 -- permanently uncalculable (e.g. Curr sensor missing), otherwise "mm:ss".
 local function formatTimeLeft(ctx)
   if not ctx.hasCurr then return "--:--" end   -- no current sensor → not computable
@@ -1036,40 +1255,23 @@ end
 -- Warnings
 -- ---------------------------------------------------------------------------
 
--- Vibrate with a warning: pulses=1 normal, 2 = stronger critical cue. No-op when haptic
+-- Vibrate with a warning, HAPTIC_PULSES[key] pulses (critical buzzes twice). No-op when haptic
 -- is off or playHaptic is absent (sim / motorless radio), so it never affects the logic.
-local function warnHaptic(ctx, pulses)
+local function warnHaptic(ctx, key)
   local cfg = ctx.config
   if not cfg or cfg.haptic ~= true or not playHaptic then return end
-  local s = cfg.hapticStrength
-  if type(s) ~= "number" then s = HAPTIC_STRENGTH_DEFAULT end
-  if s < HAPTIC_STRENGTH_MIN then s = HAPTIC_STRENGTH_MIN
-  elseif s > HAPTIC_STRENGTH_MAX then s = HAPTIC_STRENGTH_MAX end
-  local dur = HAPTIC_DUR[s] or HAPTIC_DUR[HAPTIC_STRENGTH_DEFAULT]
+  local L = LIMITS.hapticStrength
+  local s = clampNum(cfg.hapticStrength, L.min, L.max, DEFAULTS.hapticStrength)
+  local dur    = HAPTIC_DUR[s] or HAPTIC_DUR[DEFAULTS.hapticStrength]
+  local pulses = Core.HAPTIC_PULSES[key] or 1
   for i = 1, pulses do
     playHaptic(dur, (i < pulses) and dur or 0)   -- gap between pulses, none after the last
   end
 end
 
--- True unless fstat positively says the file is gone. fstat is absent on the
--- desktop and pcall-guarded, so "unknown" keeps the custom path (no regression).
-local function soundFileExists(path)
-  if not fstat then return true end
-  local ok, info = pcall(fstat, path)
-  return not ok or info ~= nil
-end
-
--- Sound override: a string is a custom path (dropped to the default when the
--- file no longer exists on the card, so the warning still sounds), `false` means
--- the user muted this warning (it stays silent), and anything else (nil /
--- garbage) falls back to the bundled default so no junk ever reaches playFile.
-local function soundOr(v, fallback)
-  if type(v) == "string" then
-    if soundFileExists(v) then return v end
-    return fallback
-  end
-  if v == false then return false end
-  return fallback
+-- Restarts the backlight timeout so a dark display lights up with a warning.
+local function wakeDisplay()
+  if lcd and lcd.resetBacklightTimeout then lcd.resetBacklightTimeout() end
 end
 
 -- Plays the warn / crit voice file once each as the remaining percentage drops
@@ -1081,20 +1283,25 @@ local function evaluateWarnings(ctx)
   if not restPct then return end
 
   local sounds = (ctx.config and ctx.config.sounds) or {}
+  local audio = not (ctx.config and ctx.config.audio == false)
   local warn, crit = getThresholds(ctx)
-  -- A muted warning (sounds.x == false) skips playFile but still buzzes: the
-  -- haptic cue has its own on/off setting and is independent of the voice.
+  -- A muted warning (sounds.x == false, or all sounds off via audio == false)
+  -- skips playFile but still buzzes: the haptic cue has its own on/off setting.
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
-    local f = soundOr(sounds.warn, WARN_SOUND)
-    if f then playFile(f) end
-    warnHaptic(ctx, 1)
+    local f = soundOr(sounds.warn)
+    if f == nil then f = Core.SOUND_DEFAULTS.warn end
+    if f and audio then playFile(Core.SOUND_DIR .. f) end
+    warnHaptic(ctx, "warn")
+    wakeDisplay()
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
-    local f = soundOr(sounds.crit, CRIT_SOUND)
-    if f then playFile(f) end
-    warnHaptic(ctx, 2)
+    local f = soundOr(sounds.crit)
+    if f == nil then f = Core.SOUND_DEFAULTS.crit end
+    if f and audio then playFile(Core.SOUND_DIR .. f) end
+    warnHaptic(ctx, "crit")
+    wakeDisplay()
   end
 end
 
@@ -1189,6 +1396,41 @@ end
 -- Per-tick pipeline
 -- ---------------------------------------------------------------------------
 
+-- Setup errors of the active model that need no telemetry, one text each (the
+-- settings tool lists them; a widget only shows that there is one). ctx as kept
+-- by tick (or pollConfig); without ctx a fresh one is read for the call.
+local function setupErrors(ctx)
+  if not ctx then
+    ctx = Core.newContext()
+    pollConfig(ctx)
+  end
+  if ctx.configError == "missing" then return { "No settings file yet" } end
+  if ctx.configError then return { "Settings file damaged" } end
+  if ctx.modelError == "missing" then return { "Model not set up" } end
+  local out = {}
+  if ctx.modelError == "no_batteries" then
+    out[#out + 1] = "No batteries assigned to this model"
+  elseif not hasMatchingCellProfile(ctx) then
+    out[#out + 1] = "No assigned battery has " .. tostring(ctx.cells) .. " cells"
+  end
+  checkSensors(ctx)
+  local missing = {}
+  if not ctx.hasRxBt then missing[#missing + 1] = ctx.sensorVoltage end
+  if not ctx.hasCapa then missing[#missing + 1] = ctx.sensorCapacity end
+  if #missing > 0 then
+    out[#out + 1] = "Missing sensors: " .. table.concat(missing, ", ")
+    out[#out + 1] = "Check sensors config"
+  end
+  return out
+end
+
+-- Preflight check met: a pack chosen (no selection open) and not low.
+local function preflightMet(ctx)
+  if not ctx.selectedProfile or ctx.pendingSelection then return false end
+  local warn, crit = getThresholds(ctx)
+  return preflight(calculateRestPct(ctx), warn, crit).level == 0
+end
+
 -- One data-processing cycle (no lcd.*), the single entry point every consumer
 -- drives. Bails out early on a config error or a missing required sensor so it
 -- never computes on absent values. Returns true when the connected branch ran,
@@ -1203,12 +1445,70 @@ local function tick(ctx)
   checkSensors(ctx)
   if not ctx.hasRxBt or not ctx.hasCapa then return false end  -- required sensors absent
   readTelemetry(ctx)
-  updateStateMachine(ctx)
-  if ctx.state ~= STATE_CONNECTED then return false end
+  updateStateMachine(ctx, preflightMet(ctx))
+  if not isActive(ctx) then return false end
   detectBattery(ctx)        -- auto-select for 1 candidate; else sets pendingSelection
   evaluateWarnings(ctx)
   refreshTimeLeft(ctx)      -- snapshot the displayed time-left every 2 s
   return true
+end
+
+-- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
+local STICK_STEP        = 500  -- deflection that counts as one cursor step
+local STICK_DEADZONE    = 200  -- re-arms the next step once back inside this
+local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
+local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit
+Core.CONFIRM_HOLD = CONFIRM_HOLD
+
+-- Stick-gesture control for the selection popup, polled every tick by the widget
+-- (works without fullscreen, unlike key events; shared with Flight Wingman). Elevator moves the cursor one step per deflection
+-- (re-armed in the dead-zone); aileron held full-right with elevator centred commits.
+local function pollSelectionSticks(ctx)
+  if not ctx.pendingSelection then return end
+
+  -- Resolve any slot that has a single candidate before reading the sticks.
+  if ctx.parallel and autoSelectSlot(ctx) then return end
+
+  local list = activeSelectionList(ctx)
+  local n = #list
+  if n == 0 then return end
+
+  local cursor = ctx.popupCursor or 1
+  if cursor < 1 then cursor = 1 elseif cursor > n then cursor = n end
+
+  -- Navigate (elevator).
+  local ele = getValue("ele")
+  if math.abs(ele) < STICK_DEADZONE then
+    ctx.stickArmed = true
+  elseif ctx.stickArmed then
+    if ele > STICK_STEP then
+      cursor = cursor - 1            -- stick up → cursor up
+      if cursor < 1 then cursor = 1 end
+      ctx.stickArmed = false
+    elseif ele < -STICK_STEP then
+      cursor = cursor + 1            -- stick down → cursor down
+      if cursor > n then cursor = n end
+      ctx.stickArmed = false
+    end
+  end
+  ctx.popupCursor = cursor
+
+  -- Confirm (aileron held full-right, elevator centred). Re-armed only after the
+  -- aileron returns to centre.
+  local ail = getValue("ail")
+  if math.abs(ail) < STICK_DEADZONE then
+    ctx.confirmArmed = true
+  end
+  if ctx.confirmArmed and ail > CONFIRM_THRESHOLD and math.abs(ele) < STICK_DEADZONE then
+    if ctx.confirmSince == nil then
+      ctx.confirmSince = getTime()
+    elseif (getTime() - ctx.confirmSince) >= CONFIRM_HOLD then
+      ctx.confirmSince = nil
+      commitSlot(ctx, list[cursor])
+    end
+  else
+    ctx.confirmSince = nil          -- released or elevator moved → reset hold timer
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -1221,10 +1521,9 @@ end
 local function newContext()
   return {
     -- State machine
-    state = STATE_WAITING,
+    phase = "WAITING",     -- flight phase (flightPhase), picks the tile
     linkLostSince     = nil,
     connectedSinceTime = 0,
-    endedTime = 0,
 
     -- Config + reload polling
     config = nil,
@@ -1245,6 +1544,8 @@ local function newContext()
     capacity    = nil,
     linkUp      = false,
     noBatterySignal = false,
+    disarmSeen      = nil, -- a disarmed FM text was seen this flight (armedFromFM)
+    armed           = false, -- known armed (armedFromFM), while the link is up
 
     -- Sensor existence (assume present until checkSensors proves otherwise, so
     -- the first frame doesn't flash "Sensor missing").
@@ -1298,12 +1599,18 @@ Core.serialize            = serialize
 Core.loadConfig           = loadConfig
 Core.saveConfig           = saveConfig
 Core.defaultConfig        = defaultConfig
+Core.normalizeConfig      = normalizeConfig
+Core.resetSettings        = resetSettings
+Core.resetStats           = resetStats
+Core.factoryReset         = factoryReset
 
 -- Derived values used by the widget's display
 Core.socFromVoltage       = socFromVoltage
 Core.getThresholds        = getThresholds
+Core.preflight            = preflight
 Core.effectiveCapacityMah = effectiveCapacityMah
 Core.calculateRestPct     = calculateRestPct
+Core.voltageLevel         = voltageLevel
 Core.formatTimeLeft       = formatTimeLeft
 Core.refreshTimeLeft      = refreshTimeLeft
 Core.cyclesFor            = cyclesFor
@@ -1314,6 +1621,7 @@ Core.activeModelName      = activeModelName
 Core.tick                 = tick
 Core.pollConfig           = pollConfig
 Core.checkSensors         = checkSensors
+Core.setupErrors          = setupErrors
 Core.readTelemetry        = readTelemetry
 Core.updateStateMachine   = updateStateMachine
 Core.detectBattery        = detectBattery
@@ -1323,10 +1631,14 @@ Core.stepSave             = stepSave
 
 -- Link status + selection helpers the widget's tiles / stick input consult
 Core.isOnline             = isOnline
+Core.isActive             = isActive
+Core.flightPhase          = flightPhase
+Core.LINK_LOSS_T, Core.ENDED_HOLD_T, Core.PRE_HOLD_T = LINK_LOSS_T, ENDED_HOLD_T, PRE_HOLD_T
 Core.isUsbConnected       = isUsbConnected
 Core.activeSelectionList  = activeSelectionList
 Core.commitSlot           = commitSlot
 Core.autoSelectSlot       = autoSelectSlot
+Core.pollSelectionSticks  = pollSelectionSticks
 
 Core.newContext           = newContext
 

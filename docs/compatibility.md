@@ -39,7 +39,7 @@ A ✅ means the feature works without extra setup, apart from a battery monitor 
 
 ## Setup
 
-What has to be set so the features work. Sensor mapping and the capacity unit are set per model under **Tools → Lipo Nanny → Models → Sensors** (see [`configuration.md`](configuration.md)). The tool only lists sensors EdgeTX already knows: with the model powered and linked, run **Discover new sensors** on the model's telemetry page first.
+What has to be set so the features work. Sensor mapping and the capacity unit are set per model under **Tools → Flight Bag → Models → Sensors** (see [`configuration.md`](configuration.md)). The tool only lists sensors EdgeTX already knows: with the model powered and linked, run **Discover new** on the model's telemetry page first.
 
 ### Flight controller (with ExpressLRS or TBS Crossfire)
 

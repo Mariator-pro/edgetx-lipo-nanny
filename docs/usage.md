@@ -11,22 +11,33 @@ the air: it watches the battery and speaks up twice per flight.
 
 ## The flight cycle
 
-The widget moves through three states:
+The widget moves through four pages:
 
 1. **Waiting**: no battery or link yet. The tile shows a `LIPO-NANNY` branding
    splash with a status line:
    - `No Battery connected…` while waiting for telemetry.
    - `Calculating…` once the link is up and it settles on the resting voltage.
    - `USB connected` when the radio is on USB power (no real flight battery).
-2. **Connected**: a battery is detected and identified. The tile shows the live
-   readout (see below). The pack is **auto-selected when exactly one** matches
-   the resting voltage; if several (or none) clearly match, you're asked to pick
-   first. Parallel models always prompt for both slots.
-3. **Ended**: link lost or battery unplugged. After a short grace period the
-   flight is closed out (cycle counting happens here) and a **flight summary** is
-   shown: `Flight ended`, the pack label, `Used X mAh (Y %)`, `Last: X V/cell`,
-   and `Total pack cycles (N)`. It returns to **Waiting** after ~30 s, or
-   immediately if you plug in again.
+2. **Preflight**: a battery is detected. The pack is **auto-selected when exactly
+   one** matches the resting voltage; if several (or none) clearly match, you're
+   asked to pick first. Parallel models always prompt for both slots. The page
+   shows the per-cell voltage (`PER CELL`), the pack voltage (`TOTAL`), the
+   threshold bar and the pack check: `PACK READY` (green) or `BATTERY LOW`
+   (yellow below the warn threshold, red below critical). It moves on to the
+   flight page as soon as the model is armed (read from the CRSF flight mode
+   `FM`), or after `PACK READY` held for 15 s (`Flight page in N s`).
+3. **Flight**: the live readout (see below).
+4. **Ended**: battery unplugged after a flight. After a short grace period
+   (1.5 s without link) the flight is closed out (cycle counting happens here)
+   and an **end page** is shown: the pack label, `USED CAPACITY` (mAh), `PACK CYCLES`, `CHARGE` (charge in % at the start and at the end, `100 % -> 23 %`),
+   `LAST VOLTAGE` (pack and per cell) and `MAX CURRENT` (shortened to `USED CAP`, `LAST V` and `MAX CURR` on narrow zones), with a bar counting down 30 s at the
+   bottom right. It returns to **Waiting** after
+   ~30 s, or immediately if you plug in again.
+   If the link drops while the model is **armed**, it is a link failure: the summary is shown and saved as well, and if the
+   link is back within 30 s the same flight carries on (no new pack selection, no
+   second cycle). After 30 s without link the flight is over. Without `FM` (e.g.
+   FrSky) every link loss ends the flight. Unplugged on the preflight page (no flight yet):
+   straight back to **Waiting**, a chosen pack is still recorded.
 
 ---
 
@@ -47,7 +58,7 @@ needed:
   fill bar grows across the row while you hold; the pick commits when it's full.
 
 The on-screen legend reads `ele: up/dn  ail: hold >`. **Parallel** models ask for
-two slots in turn — the title reads `SELECT PACK SLOT 1`, then `SELECT PACK
+two slots in turn: the title reads `SELECT PACK SLOT 1`, then `SELECT PACK
 SLOT 2` (slot 2 lists the same profile's remaining packs); a slot with only one
 candidate is taken automatically.
 
@@ -65,8 +76,8 @@ candidate is taken automatically.
   red against the warn / critical thresholds.
 - **TIME LEFT**: estimated remaining flight time (mm:ss) from the average current
   draw down to the **critical** threshold (you should be landing by then). Shows
-  `calc..` for the first 60 s while it averages, and `—:—` if there's no current
-  sensor.
+  `calc..` for the first 60 s while it averages, and `--:--` if there's no current
+  sensor. Only on zones tall enough for it (not in the 2×2 quarter tile).
 - **REMAINING**: remaining capacity in mAh, shown as `X` `of Y mAh` (Y = the
   effective, wear-adjusted capacity).
 - **CONSUMED**: what you've actually drawn this flight (the raw mAh sensor).
@@ -86,18 +97,22 @@ thresholds:
 | **Critical** | 20 % | `/SOUNDS/en/SCRIPTS/LIPONY/crit.wav` |
 
 - Each fires **once** per flight (it won't nag repeatedly).
-- Which file plays is selectable **per warning** under **Settings → Sound** —
+- Which file plays is selectable **per warning** on the Flight Bag **Alerts** page;
   `warn.wav` / `crit.wav` are just the defaults. Drop any named `*.wav` into
   `/SOUNDS/en/SCRIPTS/LIPONY/` and pick it there, or choose **Off** to silence
   that warning's voice entirely.
-- **Optional haptic:** enable **Settings → Haptic feedback** and the radio also
+- **Optional haptic:** enable **Alerts → Vibration** in Flight Bag and the radio also
   buzzes with each warning (one pulse for Low, two for Critical; strength
   selectable). No effect on radios without a vibration motor. The haptic is
   independent of the voice: a warning set to **Off** still buzzes when haptic is on.
+- **All sounds off:** **Sounds** `Off` in the Flight Bag Alerts page silences every
+  announcement at once (shared with the other Flight Bag scripts); vibration stays.
+- **Display:** each warning switches a dimmed display back on (restarts the
+  backlight timeout), so a glance at the radio shows why it warned.
 - If you plug in a pack that is **already below the warn threshold**, the low
   announcement is suppressed (you knowingly started part used); the critical
   announcement stays armed.
-- Thresholds are global (**Settings**) and can be overridden **per profile**.
+- Thresholds are global (Flight Bag **Warnings** page) and can be overridden **per profile**.
 - The files are yours to supply, e.g. *"return to home"* and *"land now"*. A
   missing file just stays silent; nothing breaks.
 - Placing the widget on **two** screens means two widget instances, so you may
@@ -116,7 +131,7 @@ thresholds:
   used pack, even when the flight was too short to earn a cycle.
 - Set a pack's **Wear %** (Batteries → profile → Packs) as it ages; the warnings
   then fire **earlier** without you re-tuning any thresholds.
-- Reset all cycle counts and statistics via **Settings → Reset statistics**; the
+- Reset all cycle counts and statistics via **Reset stats** in the Lipo Nanny popup of Flight Bag; the
   running widget picks the change up within a few seconds, no restart needed.
 
 ---

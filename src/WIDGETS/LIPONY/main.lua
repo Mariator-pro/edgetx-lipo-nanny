@@ -40,11 +40,8 @@ end
 local TICK_INTERVAL = 10   -- 0.1 s data-processing cadence
 local ERROR_LIMIT   = 5    -- consecutive tick failures before the widget gives up
 
--- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
-local STICK_STEP        = 500  -- deflection that counts as one cursor step
-local STICK_DEADZONE    = 200  -- re-arms the next step once back inside this
-local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
-local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit
+-- Confirm hold of the selection popup (the gestures live in the core).
+local CONFIRM_HOLD = core and core.CONFIRM_HOLD or 100
 -- Opacity of the confirm-hold fill (0 = opaque, 15 = invisible): semi-transparent
 -- so the solid-brand cursor text stays readable on top.
 local CONFIRM_FILL_OPACITY = 8
@@ -153,10 +150,13 @@ end
 
 -- Largest font flag whose rendered text fits within maxW×maxH, plus its measured
 -- width/height. Falls back to the smallest font if nothing fits.
-local function pickFont(text, maxW, maxH)
+-- maxFont (optional): the largest font to consider.
+local function pickFont(text, maxW, maxH, maxFont)
+  local capped = not maxFont
   for _, flag in ipairs(FONT_STEPS) do
+    if flag == maxFont then capped = true end
     local tw, th = textW(text, flag), fontH(flag)
-    if tw <= maxW and th <= maxH then return flag, tw, th end
+    if capped and tw <= maxW and th <= maxH then return flag, tw, th end
   end
   local tw, th = textW(text, SMLSIZE), fontH(SMLSIZE)
   return SMLSIZE, tw, th
@@ -195,7 +195,7 @@ local function formatBatteryLabel(name, instances)
 end
 
 -- ---------------------------------------------------------------------------
--- CONNECTED tile: readouts, battery glyph and threshold bar, scaling down through
+-- Live tile (PRE and FLIGHT): readouts, battery glyph and threshold bar, scaling down through
 -- FULL → MEDIUM → SMALL tiers by zone size.
 -- ---------------------------------------------------------------------------
 
@@ -325,18 +325,12 @@ end
 -- per-cell voltage thresholds. Falls back to the accent green when
 -- voltage/cells/chemistry are unavailable.
 local function voltageColor(ctx)
-  local profile = ctx.selectedProfile
-  local chem    = profile and core.CHEMISTRIES[profile.chemistry]
-  if not chem or not chem.voltageWarn or not ctx.voltage or not ctx.cells or ctx.cells <= 0 then
-    return COLORS.accent
-  end
-  local vpc = ctx.voltage / ctx.cells
-  if vpc >= chem.voltageWarn then return COLORS.accent end
-  if vpc >= chem.voltageCrit then return WARN_COL   end
-  return CRIT_COL
+  local lvl = core.voltageLevel(ctx)
+  if lvl == nil then return COLORS.fg end   -- missing value: neutral, not OK
+  return (lvl == 0 and COLORS.accent) or (lvl == 1 and WARN_COL) or CRIT_COL
 end
 
--- Builds the display strings/colours once for the active CONNECTED metrics.
+-- Builds the display strings/colours once for the live tile metrics.
 local function connectedMetrics(ctx)
   local restPct    = core.calculateRestPct(ctx)
   local warn, crit = core.getThresholds(ctx)
@@ -350,7 +344,7 @@ local function connectedMetrics(ctx)
     restPct  = restPct,
     warn     = warn,
     crit     = crit,
-    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.muted,
+    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.fg,   -- missing: neutral
     vColor   = voltageColor(ctx),
     label    = formatBatteryLabel(profile, ctx.selectedInstances),
     pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
@@ -410,7 +404,7 @@ local function drawConnectedFull(w, h, m)
   local maxBigH    = math.floor(midH * 0.5)
   -- Size % from a fixed "100%" reference so "1%" isn't bigger than "100%"; V is
   -- one step smaller (shrunk further only if it overflows).
-  local pctFlag    = pickFont("100%", colW, maxBigH)
+  local pctFlag    = pickFont("100%", colW, maxBigH, MIDSIZE)   -- at most MIDSIZE, like Link Sentinel's %
   local vFlag      = fitWidth(m.vText .. "V", smallerFont(pctFlag), colW)
   -- Shared bottom edge for both big numbers (= the taller, % one) so the rows
   -- beneath them align across the two columns.
@@ -522,6 +516,15 @@ local function drawConnectedSmall(w, h, m)
     { ord = 2, h = bigH, draw = function(y)
         dtext(leftX,  y, pctS, m.pctColor, bigFlag)
         dtext(rightX, y, vS,   m.vColor,   bigFlag)
+        -- without the REMAINING row the caption sits beside the % (short LEFT), when it fits
+        local capX = leftX + textW(pctS, bigFlag) + sx(6)
+        if nRows < 3 then
+          local cap = "REMAINING"
+          if capX + textW(cap, SMLSIZE) > rightX - sx(4) then cap = "LEFT" end
+          if capX + textW(cap, SMLSIZE) <= rightX - sx(4) then
+            dtext(capX, y + bigH - smlH, cap, COLORS.muted, SMLSIZE)
+          end
+        end
       end },
     { ord = 1, h = smlH, draw = function(y) drawHeaderLabel(pad, y, m.label) end },
     { ord = 3, h = smlH, draw = pairDraw("REMAINING", COLORS.muted, m.vCell, COLORS.muted) },
@@ -681,7 +684,7 @@ local function drawWaitingTile(ctx)
   local base
   if core.isUsbConnected(ctx) then
     base = USB_BASE
-  elseif ctx.state == core.STATE_CONNECTED and core.isOnline(ctx) then
+  elseif core.isActive(ctx) and core.isOnline(ctx) then
     base = SETTLE_BASE
   else
     base = WAIT_BASE
@@ -713,128 +716,209 @@ end
 -- ENDED tile
 -- ---------------------------------------------------------------------------
 
--- ENDED tile: flight summary, all SMLSIZE, fixed row pitch. Rows drop by priority
--- when height runs out: header, Used, cycles, Last, then "Flight ended" (decorative,
--- drops first).
-local function drawEndedTile(ctx)
-  local pad     = sx(4)
-  local h       = ctx.zone.h
-  local lf      = ctx.lastFlight or {}
-  local label   = formatBatteryLabel(lf.profileName, lf.instances)
-  local smlH = fontH(SMLSIZE)
-  local rowH    = smlH + sx(3)
+-- ---------------------------------------------------------------------------
+-- Preflight and end pages (flight phases PRE and ENDED): the content of Flight
+-- Wingman's battery column, header and margins as on the live tile.
+-- ---------------------------------------------------------------------------
 
-  -- Used X mAh (Y%) — Y% includes the start offset.
-  local usedText
-  if lf.usedMah then
-    local pctStr = ""
-    if lf.effectiveCap and lf.effectiveCap > 0 then
-      local effectiveUsed = lf.usedMah + (lf.startOffsetMah or 0)
-      local pct = math.floor(effectiveUsed / lf.effectiveCap * 100 + 0.5)
-      pctStr = string.format(" (%d %%)", pct)
-    end
-    usedText = string.format("Used %d mAh%s", math.floor(lf.usedMah + 0.5), pctStr)
-  else
-    usedText = "Used --"
-  end
-
-  local lastText
-  if lf.lastVoltagePerCell then
-    lastText = string.format("Last: %.2f V/cell", lf.lastVoltagePerCell)
-  else
-    lastText = "Last: --.- V/cell"
-  end
-
-  -- Total cycles of the flown pack(s); finalizeFlight already incremented the stored
-  -- count. Parallel shows both, e.g. "(16, 8)".
-  local cyclesStr = "--"
-  if lf.instances and #lf.instances > 0 then
-    local parts = {}
-    for _, inst in ipairs(lf.instances) do
-      parts[#parts + 1] = tostring(core.cyclesFor(ctx, inst.id))
-    end
-    cyclesStr = table.concat(parts, ", ")
-  end
-
-  local nRows = math.floor((h - 2 * pad - smlH) / rowH) + 1
-  if nRows < 1 then nRows = 1 end
-  if nRows > 5 then nRows = 5 end
-
-  -- Candidates in PRIORITY order; `ord` is the on-screen position (top = 1).
-  -- "Flight ended" (ord 2) is decorative and drops first.
-  local cand = {
-    { ord = 1, draw = function(y) drawHeaderLabel(pad, y, label) end },
-    { ord = 3, draw = function(y) dtext(pad, y, usedText, COLORS.fg, SMLSIZE) end },
-    { ord = 5, draw = function(y) dtext(pad, y, "Total pack cycles (" .. cyclesStr .. ")", COLORS.muted, SMLSIZE) end },
-    { ord = 4, draw = function(y) dtext(pad, y, lastText, COLORS.muted, SMLSIZE) end },
-    { ord = 2, draw = function(y) dtext(pad, y, "Flight ended", BRAND, SMLSIZE) end },
-  }
-  local rows = {}
-  for i = 1, nRows do rows[i] = cand[i] end
-  table.sort(rows, function(a, b) return a.ord < b.ord end)
-
-  local y = pad
-  for i = 1, #rows do
-    rows[i].draw(y)
-    y = y + rowH
-  end
+-- Colour of a check level: 0 accent, 1 yellow, 2 red.
+local function levelColor(level)
+  if level == 2 then return CRIT_COL end
+  if level == 1 then return WARN_COL end
+  return COLORS.accent
 end
 
+-- Seconds left on a page timer that started at `since` (the core's ms clock,
+-- getTime() * 10) and runs `total` ms.
+local function secsLeft(since, total)
+  return math.max(0, math.ceil((total - (getTime() * 10 - since)) / 1000))
+end
+
+-- Countdown at the bottom right: text left of a bar that runs empty. The text
+-- shrinks to the seconds when the row is too narrow.
+local function drawCountdown(x0, W, y, secs, total, label)
+  local smlH = fontH(SMLSIZE)
+  local barH = math.max(3, sx(6))
+  local barW = math.max(sx(30), math.floor(W * 0.35))
+  local bx   = x0 + W - barW
+  local by   = y + math.floor((smlH - barH) / 2)
+  lcd.drawFilledRectangle(bx, by, barW, barH, COLORS.track)
+  local fw = math.floor(barW * math.max(0, math.min(1, secs / total)))
+  if fw > 0 then lcd.drawFilledRectangle(bx, by, fw, barH, COLORS.muted) end
+  local txt = string.format("%s in %d s", label, secs)
+  if textW(txt, SMLSIZE) > bx - sx(6) - x0 then txt = string.format("%d s", secs) end
+  dtext(bx - sx(6) - textW(txt, SMLSIZE), y, txt, COLORS.muted, SMLSIZE)
+end
+
+-- Status line: dot plus text in the level colour (PACK READY / BATTERY LOW).
+local function drawStatusLine(x, y, st)
+  local smlH = fontH(SMLSIZE)
+  local r    = math.max(2, sx(4))
+  local col  = levelColor(st.level)
+  lcd.drawFilledCircle(x + r, y + math.floor(smlH / 2), r, col)
+  dtext(x + 2 * r + sx(4), y, st.text, col, SMLSIZE)
+  return 2 * r + sx(4) + textW(st.text, SMLSIZE)
+end
+
+-- Rows evenly spread below the header (header = row 0, n rows, the last at the
+-- bottom pad), as on the MEDIUM live tile; the pitch never drops below a
+-- compressed line.
+local function rowSpread(h, pad, n)
+  local smlH = fontH(SMLSIZE)
+  local span = h - 2 * pad - smlH
+  if span < n * (smlH - sx(4)) then span = n * (smlH - sx(4)) end
+  return function(i) return pad + math.floor(i * span / n + 0.5) end
+end
+
+-- Preflight page: per-cell voltage (big, check colour) with the pack total,
+-- the threshold bar, the battery status and the countdown to the flight page
+-- while the check is met. Status and countdown rows are fixed, the countdown
+-- row stays empty while it does not run, so nothing moves. Zones below FULL
+-- keep header, a voltage row, status and countdown as far as they fit.
+local function drawPreTile(ctx)
+  local w, h   = ctx.zone.w, ctx.zone.h
+  local pad    = sx(4)
+  local smlH   = fontH(SMLSIZE)
+  local m      = connectedMetrics(ctx)
+  local st     = core.preflight(m.restPct, m.warn, m.crit)
+  local col    = levelColor(st.level)
+  local hasV   = ctx.voltage and ctx.cells and ctx.cells > 0
+  local cell   = hasV and string.format("%.2f", ctx.voltage / ctx.cells) or "-.--"
+  local total  = ctx.voltage and string.format("%.1f V", ctx.voltage) or "--.- V"
+  local secs   = ctx.readySince and secsLeft(ctx.readySince, core.PRE_HOLD_T)
+  drawHeaderLabel(pad, pad, m.label)
+  local bottomY = h - pad - smlH
+  local function countdown(y)
+    if secs then drawCountdown(pad, w - 2 * pad, y, secs, core.PRE_HOLD_T / 1000, "Flight page") end
+  end
+
+  if not connectedFitsFull(w, h) then
+    local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
+    -- rows as on Link Sentinel and GPS Homer: voltage, bar, status, countdown; with
+    -- three rows the countdown joins the status line, with two the bar goes too
+    local k    = math.max(1, math.min(4, n))
+    local rowY = rowSpread(h, pad, k)
+    local bar  = k >= 3 and 1 or 0
+    -- value row as on Link Sentinel: value + unit coloured (up to MIDSIZE),
+    -- PER CELL muted beside it, TOTAL muted before the pack voltage on the right
+    local top    = rowY(1)
+    local valTxt = cell .. " V"
+    local numF   = SMLSIZE
+    local maxH   = k >= 2 and (rowY(2) - sx(2) - top) or (h - pad - top)
+    for _, f in ipairs({ MIDSIZE, 0 }) do
+      if textW(valTxt, f) <= (w - 2 * pad) * 0.5 and fontH(f) <= maxH then numF = f; break end
+    end
+    dtext(pad, top, valTxt, col, numF)
+    local capY = top + fontH(numF) - smlH
+    local totX = w - pad - textW("TOTAL ", SMLSIZE) - textW(total, SMLSIZE)
+    dtext(totX, capY, "TOTAL ", COLORS.muted, SMLSIZE)
+    dtext(totX + textW("TOTAL ", SMLSIZE), capY, total, COLORS.fg, SMLSIZE)
+    local capX = pad + textW(valTxt, numF) + sx(6)
+    if capX + textW("PER CELL", SMLSIZE) <= totX - sx(4) then
+      dtext(capX, capY, "PER CELL", COLORS.muted, SMLSIZE)
+    end
+    if bar == 1 then
+      local barH = sx(8)
+      drawThresholdBar(pad, rowY(2) + math.floor((smlH - barH) / 2), w - 2 * pad, barH, m.restPct, m.warn, m.crit, false)
+    end
+    if k >= 4 then
+      drawStatusLine(pad, rowY(3), st)
+      countdown(rowY(4))
+    elseif k >= 2 then   -- no row of its own: the countdown joins the status line
+      local cx = pad + drawStatusLine(pad, rowY(k), st) + sx(8)
+      if secs then drawCountdown(cx, w - pad - cx, rowY(k), secs, core.PRE_HOLD_T / 1000, "Flight page") end
+    end
+    return
+  end
+
+  -- FULL: big per-cell value with the caption beside it, TOTAL right, then the threshold bar
+  -- (WARN/CRIT captions when there is room), the status and the bottom row;
+  -- the spare height is shared out evenly between the blocks.
+  local top     = pad + smlH + METRIC_GAP
+  local bigFlag = pickFont("0.00V", math.floor((w - 2 * pad) * 0.5), math.floor((bottomY - top) * 0.4))
+  local bigH    = fontH(bigFlag)
+  local barH    = sx(8)
+  local fixed   = bigH + barH + smlH
+  local labels  = (bottomY - top - fixed) >= 2 * smlH + sx(3) + 3 * sx(4)
+  -- at least one text row high, so the status line sits where the sibling widgets put it
+  local barBlk  = math.max(smlH, barH + (labels and (2 * smlH + sx(3)) or 0))
+  local gap     = math.max(0, math.floor((bottomY - top - (fixed - barH + barBlk)) / 3))
+  local vw      = drawValueUnit(pad, top, cell, "V", col, bigFlag, smallerFont(bigFlag))
+  local tw      = textW(total, 0)
+  -- TOTAL above the value only when it clears the heartbeat dot, else beside it
+  local tcapY   = top + bigH - fontH(0) - smlH
+  local stacked = tcapY >= sx(12)
+  local rightW  = stacked and math.max(tw, textW("TOTAL", SMLSIZE)) or (textW("TOTAL", SMLSIZE) + sx(4) + tw)
+  local capX    = pad + vw + sx(6)
+  if capX + textW("PER CELL", SMLSIZE) <= w - pad - rightW - sx(4) then
+    dtext(capX, top + bigH - smlH, "PER CELL", COLORS.muted, SMLSIZE)
+  end
+  dtext(w - pad - tw, top + bigH - fontH(0), total, COLORS.fg, 0)
+  if stacked then
+    dtext(w - pad - textW("TOTAL", SMLSIZE), tcapY, "TOTAL", COLORS.muted, SMLSIZE)
+  else
+    dtext(w - pad - rightW, top + bigH - smlH, "TOTAL", COLORS.muted, SMLSIZE)
+  end
+  local blkY    = top + bigH + gap
+  local barY    = blkY + (labels and (smlH + sx(1)) or math.floor((barBlk - barH) / 2))
+  drawThresholdBar(pad, barY, w - 2 * pad, barH, m.restPct, m.warn, m.crit, labels)
+  drawStatusLine(pad, blkY + barBlk + gap, st)
+  countdown(bottomY)
+end
+
+-- Muted label left, value right-aligned at the row's end; `pre` (optional) is
+-- drawn in the text colour right before the value (two-colour values).
+-- label: text, or { long, short } (the short one when the long one does not fit
+-- beside the value); a label that does not fit at all is left out, the value stays.
+local function drawLR(x, w, y, label, value, col, pre)
+  local vx   = x + w - textW(value, SMLSIZE)
+  local room = vx - (pre and textW(pre, SMLSIZE) or 0) - sx(6) - x
+  if type(label) == "table" then
+    label = textW(label[1], SMLSIZE) <= room and label[1] or label[2]
+  end
+  if textW(label, SMLSIZE) <= room then dtext(x, y, label, COLORS.muted, SMLSIZE) end
+  dtext(vx, y, value, col or COLORS.fg, SMLSIZE)
+  if pre then dtext(vx - textW(pre, SMLSIZE), y, pre, COLORS.fg, SMLSIZE) end
+end
+
+-- End page: used mAh, the pack cycles, start and remaining charge in one row,
+-- last voltage and highest current of the flight just ended, and the
+-- countdown to the wait page. Rows are dropped from the end on short zones.
+local function drawEndedTile(ctx)
+  local w, h  = ctx.zone.w, ctx.zone.h
+  local pad   = sx(4)
+  local smlH  = fontH(SMLSIZE)
+  local lf    = ctx.lastFlight or {}
+  local warn, crit = core.getThresholds(ctx)
+  local cap, off   = lf.effectiveCap, lf.startOffsetMah
+  local start = (cap and cap > 0 and off) and math.floor(100 - off / cap * 100 + 0.5) or nil
+  local left  = (cap and cap > 0 and off and lf.usedMah)
+                and math.max(0, math.floor((cap - lf.usedMah - off) / cap * 100 + 0.5)) or nil
+  local vpc   = lf.lastVoltagePerCell
+  local lastV = (vpc and ctx.cells) and string.format("%.1f V  %.2f V/c", vpc * ctx.cells, vpc) or "--"
+  local cycles = {}
+  for _, inst in ipairs(lf.instances or {}) do cycles[#cycles + 1] = tostring(core.cyclesFor(ctx, inst.id)) end
+  local rows = {
+    { { "USED CAPACITY", "USED CAP" }, lf.usedMah and string.format("%d mAh", math.floor(lf.usedMah + 0.5)) or "--" },
+    { "PACK CYCLES", (#cycles > 0) and table.concat(cycles, ", ") or "--" },
+    { "CHARGE", left and (left .. " %") or "--", left and getBarColor(left, warn, crit),
+      (start and (start .. " %") or "--") .. " -> " },
+    { { "LAST VOLTAGE", "LAST V" }, lastV },
+    { { "MAX CURRENT", "MAX CURR" }, ctx.maxCurrent and string.format("%.1f A", ctx.maxCurrent) or "--" },
+  }
+  drawHeaderLabel(pad, pad, formatBatteryLabel(lf.profileName, lf.instances))
+  local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
+  local k    = math.max(0, math.min(#rows, n - 1))
+  local rowY = rowSpread(h, pad, k + 1)
+  for i = 1, k do drawLR(pad, w - 2 * pad, rowY(i), rows[i][1], rows[i][2], rows[i][3], rows[i][4]) end
+  drawCountdown(pad, w - 2 * pad, rowY(k + 1), secsLeft(ctx.endedAt or 0, core.ENDED_HOLD_T),
+                core.ENDED_HOLD_T / 1000, "Wait page")
+end
 
 -- ---------------------------------------------------------------------------
 -- Battery-selection popup
 -- ---------------------------------------------------------------------------
 
--- Stick-gesture control for the selection popup, polled every tick (works without
--- fullscreen, unlike key events). Elevator moves the cursor one step per deflection
--- (re-armed in the dead-zone); aileron held full-right with elevator centred commits.
-local function pollSelectionSticks(ctx)
-  if not ctx.pendingSelection then return end
-
-  -- Resolve any slot that has a single candidate before reading the sticks.
-  if ctx.parallel and core.autoSelectSlot(ctx) then return end
-
-  local list = core.activeSelectionList(ctx)
-  local n = #list
-  if n == 0 then return end
-
-  local cursor = ctx.popupCursor or 1
-  if cursor < 1 then cursor = 1 elseif cursor > n then cursor = n end
-
-  -- Navigate (elevator).
-  local ele = getValue("ele")
-  if math.abs(ele) < STICK_DEADZONE then
-    ctx.stickArmed = true
-  elseif ctx.stickArmed then
-    if ele > STICK_STEP then
-      cursor = cursor - 1            -- stick up → cursor up
-      if cursor < 1 then cursor = 1 end
-      ctx.stickArmed = false
-    elseif ele < -STICK_STEP then
-      cursor = cursor + 1            -- stick down → cursor down
-      if cursor > n then cursor = n end
-      ctx.stickArmed = false
-    end
-  end
-  ctx.popupCursor = cursor
-
-  -- Confirm (aileron held full-right, elevator centred). Re-armed only after the
-  -- aileron returns to centre.
-  local ail = getValue("ail")
-  if math.abs(ail) < STICK_DEADZONE then
-    ctx.confirmArmed = true
-  end
-  if ctx.confirmArmed and ail > CONFIRM_THRESHOLD and math.abs(ele) < STICK_DEADZONE then
-    if ctx.confirmSince == nil then
-      ctx.confirmSince = getTime()
-    elseif (getTime() - ctx.confirmSince) >= CONFIRM_HOLD then
-      ctx.confirmSince = nil
-      core.commitSlot(ctx, list[cursor])
-    end
-  else
-    ctx.confirmSince = nil          -- released or elevator moved → reset hold timer
-  end
-end
 
 -- Popup name marquee: a name too long for its row scrolls by one character per
 -- MARQUEE_STEP, pausing MARQUEE_PAUSE steps at the start and the end. Scrolling by
@@ -932,7 +1016,7 @@ local function drawSelectionPopup(ctx)
   local last = math.min(#list, start + maxRows - 1)
 
   -- Confirm-hold progress (0..1): non-zero only during an active hold
-  -- (pollSelectionSticks sets/clears ctx.confirmSince on hold/release).
+  -- (core.pollSelectionSticks sets/clears ctx.confirmSince on hold/release).
   local confirmProgress = 0
   if ctx.confirmSince then
     confirmProgress = (getTime() - ctx.confirmSince) / CONFIRM_HOLD
@@ -960,7 +1044,10 @@ local function drawSelectionPopup(ctx)
     else
       shown = fitFrom(name, 1, nameW)
     end
-    dtext(pad, y, prefix .. shown .. suffix, (i == cursor) and BRAND or COLORS.fg, SMLSIZE)
+    -- the number sits fixed at the right edge, so it never jumps with the scrolling name
+    local col = (i == cursor) and BRAND or COLORS.fg
+    dtext(pad, y, prefix .. shown, col, SMLSIZE)
+    dtext(pad + availW - textW(suffix, SMLSIZE), y, suffix, col, SMLSIZE)
     y = y + rowH
   end
 
@@ -1001,9 +1088,11 @@ end
 -- the googly-eyes mascot beside it.
 local function drawBrandHeading(ctx)
   local pad = sx(4)
-  dtext(pad, pad, "LIPO-NANNY", BRAND, SMLSIZE)
-  local hw, hh = textW("LIPO-NANNY", SMLSIZE), fontH(SMLSIZE)
-  drawMascotEyes(pad + hw + sx(6), pad, sx(20), math.max(hh, sx(14)))
+  local hh, sq = fontH(SMLSIZE), sx(5)   -- accent square + title as on GPS Homer
+  lcd.drawFilledRectangle(pad, pad + math.floor((hh - sq) / 2), sq, sq, BRAND)
+  local tx = pad + sq + sx(3)
+  dtext(tx, pad, "LIPO-NANNY", BRAND, SMLSIZE)
+  drawMascotEyes(tx + textW("LIPO-NANNY", SMLSIZE) + sx(6), pad, sx(20), math.max(hh, sx(14)))
 end
 
 -- Height of the brand-heading band (top pad + the taller of text / mascot-eye
@@ -1075,7 +1164,7 @@ end
 -- One data-processing cycle (no lcd.*): the core pipeline, then stick navigation
 -- while a selection popup is open.
 local function tickImpl(ctx)
-  if core.tick(ctx) then pollSelectionSticks(ctx) end
+  if core.tick(ctx) then core.pollSelectionSticks(ctx) end
 end
 
 -- Throttled, fault-tolerant wrapper called from both background() and refresh():
@@ -1114,7 +1203,7 @@ local function drawTile(ctx)
 
   -- core.lua not installed / broken: same error-tile UI as every other problem.
   if not core then
-    drawErrorTile(ctx, "core.lua missing", "Install on SD card")
+    drawErrorTile(ctx, "Core missing", "Reinstall Lipo Nanny")
     return
   end
 
@@ -1124,40 +1213,15 @@ local function drawTile(ctx)
     return
   end
 
-  -- Config / model setup problems.
-  if ctx.configError == "missing" then
-    drawErrorTile(ctx, "Setup required", "Open Tools/Lipo Nanny")
-    return
-  end
-  if ctx.configError == "parse" or ctx.configError == "schema" then
-    drawErrorTile(ctx, "Config invalid", "Open Tools/Lipo Nanny")
-    return
-  end
-  if ctx.modelError == "missing" then
-    drawHeadedMessage(ctx, {
-      "Model not configured",
-      '"' .. (core.activeModelName() or core.modelFilename() or "?") .. '"',
-      "Open Tools/Lipo Nanny",
-    })
-    return
-  end
-  if ctx.modelError == "no_batteries" then
-    drawErrorTile(ctx, "No batteries assigned", "Open Tools/Lipo Nanny")
-    return
-  end
-
-  -- Telemetry setup problems.
-  if not ctx.hasRxBt or not ctx.hasCapa then
-    drawErrorTile(ctx, "Sensor missing", "Discover in EdgeTX")
-    return
-  end
-  if ctx.cellMismatch then
-    drawErrorTile(ctx, "Cell count mismatch", "Open Tools/Lipo Nanny")
+  -- Setup problems (settings, model, sensors, cell count): one tile, the details
+  -- are listed in the settings tool.
+  if #core.setupErrors(ctx) > 0 then
+    drawErrorTile(ctx, "Configuration error", "Please check Tool Flight Bag")
     return
   end
 
   -- Battery-selection popup (0 or >1 plausible candidates). Driven by stick
-  -- gestures in tick() (pollSelectionSticks); here we only render it. Commit
+  -- gestures in tick() (core.pollSelectionSticks); here we only render it. Commit
   -- clears pendingSelection, so the next frame falls through to the live tile.
   if ctx.pendingSelection then
     drawSelectionPopup(ctx)
@@ -1165,19 +1229,21 @@ local function drawTile(ctx)
     return
   end
 
-  -- State-based tiles.
-  if ctx.state == core.STATE_WAITING then
+  -- Tiles by flight phase: preflight page, live tile in flight, end page.
+  if ctx.phase == "WAITING" then
     drawWaitingTile(ctx)
-  elseif ctx.state == core.STATE_CONNECTED then
-    -- Settle window: reuse the waiting tile instead of a CONNECTED tile full of "--"
+  elseif core.isActive(ctx) then
+    -- Settle window: reuse the waiting tile instead of a live tile full of "--"
     -- (cellMismatch/popup handled above, so nil profile here means "still settling").
-    if ctx.selectedProfile then
+    if ctx.selectedProfile and ctx.phase == "PRE" then
+      drawPreTile(ctx)
+    elseif ctx.selectedProfile then
       drawConnectedTile(ctx)
     else
       drawWaitingTile(ctx)
     end
     if core.isOnline(ctx) then drawHeartbeat(ctx) end
-  elseif ctx.state == core.STATE_ENDED then
+  elseif ctx.phase == "ENDED" then
     drawEndedTile(ctx)
   end
 end
