@@ -63,14 +63,14 @@ local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
 -- sounds.<key> (false = muted, absent = the default; a missing custom file
 -- falls back to the default).
 Core.SOUND_DIR      = "/SOUNDS/en/SCRIPTS/LIPONY/"
-Core.SOUND_KEYS     = { "warn", "crit" }
-Core.SOUND_DEFAULTS = { warn = "warn.wav", crit = "crit.wav" }
+Core.SOUND_KEYS     = { "warn", "crit", "charge" }
+Core.SOUND_DEFAULTS = { warn = "warn.wav", crit = "crit.wav", charge = "charge.wav" }
 
 -- Optional haptic alongside the warning sounds, off by default: pulse length per
 -- strength tier (tune on the radio) and pulses per warning (critical buzzes twice).
 local HAPTIC_DUR = { [1] = 15, [2] = 30, [3] = 50 }
 Core.HAPTIC_DUR    = HAPTIC_DUR
-Core.HAPTIC_PULSES = { warn = 1, crit = 2 }
+Core.HAPTIC_PULSES = { warn = 1, crit = 2, charge = 1 }
 
 -- Editable ranges and factory defaults, keyed like the config: the single source
 -- for defaultConfig(), getThresholds(), normalizeConfig() and the settings tool.
@@ -788,6 +788,7 @@ local function resetFlightState(ctx)
   ctx.capacity            = nil
   ctx.warnPlayed          = false
   ctx.critPlayed          = false
+  ctx.chargePending       = false
   ctx.currentSumA         = 0
   ctx.currentSampleCount  = 0
   ctx.timeLeftStr         = nil   -- recompute the displayed time-left promptly
@@ -1198,12 +1199,13 @@ local function applySelection(ctx, profile, instances)
   local effective    = effectiveCapacityMah(ctx) or 0
   ctx.startOffsetMah = (100 - soc) / 100 * effective
 
-  -- Suppress the early warning if the pack is already below the warn threshold
-  -- at connect (the pilot knowingly plugged in a part-used pack). The critical
-  -- warning stays armed.
-  local warn = getThresholds(ctx)
-  ctx.warnPlayed = soc <= warn
-  ctx.critPlayed = false
+  -- A pack already below the warn threshold at connect gets the "not charged"
+  -- announcement instead: "return home" / "land now" make no sense on the
+  -- ground, so only thresholds crossed later play them.
+  local warn, crit = getThresholds(ctx)
+  ctx.warnPlayed    = soc <= warn
+  ctx.critPlayed    = soc <= crit
+  ctx.chargePending = soc <= warn
 end
 
 -- True if the model has at least one assigned profile of its cell count.
@@ -1274,34 +1276,40 @@ local function wakeDisplay()
   if lcd and lcd.resetBacklightTimeout then lcd.resetBacklightTimeout() end
 end
 
--- Plays the warn / crit voice file once each as the remaining percentage drops
--- past the thresholds. No debounce: the mAh counter only rises, so each
--- threshold is crossed exactly once per flight.
+-- Sound, haptic and backlight for one warning. A muted warning (sounds.x ==
+-- false, or all sounds off via audio == false) skips playFile but still
+-- buzzes: the haptic cue has its own on/off setting.
+local function alert(ctx, key)
+  local sounds = (ctx.config and ctx.config.sounds) or {}
+  local audio = not (ctx.config and ctx.config.audio == false)
+  local f = soundOr(sounds[key])
+  if f == nil then f = Core.SOUND_DEFAULTS[key] end
+  if f and audio then playFile(Core.SOUND_DIR .. f) end
+  warnHaptic(ctx, key)
+  wakeDisplay()
+end
+
+-- Plays "not charged" once for a pack already low at connect, then the warn /
+-- crit voice file once each as the remaining percentage drops past the
+-- thresholds. No debounce: the mAh counter only rises, so each threshold is
+-- crossed exactly once per flight.
 local function evaluateWarnings(ctx)
   if not ctx.selectedProfile then return end
+  if ctx.chargePending then
+    ctx.chargePending = false
+    alert(ctx, "charge")
+  end
   local restPct = calculateRestPct(ctx)
   if not restPct then return end
 
-  local sounds = (ctx.config and ctx.config.sounds) or {}
-  local audio = not (ctx.config and ctx.config.audio == false)
   local warn, crit = getThresholds(ctx)
-  -- A muted warning (sounds.x == false, or all sounds off via audio == false)
-  -- skips playFile but still buzzes: the haptic cue has its own on/off setting.
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
-    local f = soundOr(sounds.warn)
-    if f == nil then f = Core.SOUND_DEFAULTS.warn end
-    if f and audio then playFile(Core.SOUND_DIR .. f) end
-    warnHaptic(ctx, "warn")
-    wakeDisplay()
+    alert(ctx, "warn")
   end
   if not ctx.critPlayed and restPct <= crit then
     ctx.critPlayed = true
-    local f = soundOr(sounds.crit)
-    if f == nil then f = Core.SOUND_DEFAULTS.crit end
-    if f and audio then playFile(Core.SOUND_DIR .. f) end
-    warnHaptic(ctx, "crit")
-    wakeDisplay()
+    alert(ctx, "crit")
   end
 end
 
@@ -1576,6 +1584,7 @@ local function newContext()
     -- Warning trigger flags
     warnPlayed = false,
     critPlayed = false,
+    chargePending = false,
 
     -- Time-left averaging
     currentSumA = 0,

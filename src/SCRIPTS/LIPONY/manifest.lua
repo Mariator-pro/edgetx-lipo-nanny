@@ -22,11 +22,11 @@ return function(core)
     },
 
     fields = {
-      { key = "warnPct", page = "warnings", label = "Low",
+      { key = "warnPct", page = "warnings", label = "Battery low",
         min = L.warnPct.min, max = L.warnPct.max, step = L.warnPct.step,
         default = D.warnPct, unit = "%",
         hint = "Warn below %v left (battery profiles can override)" },
-      { key = "critPct", page = "warnings", label = "Critical",
+      { key = "critPct", page = "warnings", label = "Battery critical",
         min = L.critPct.min, max = L.critPct.max, step = L.critPct.step,
         default = D.critPct, unit = "%",
         hint = "Critical alert below %v left" },
@@ -41,12 +41,13 @@ return function(core)
 
     -- Rows on the Alerts page, in core.SOUND_KEYS order
     sounds = {
-      warn = { label = "Low",      hint = "Battery at the Low threshold" },
-      crit = { label = "Critical", hint = "Battery at the Critical threshold" },
+      warn   = { label = "Battery low",         hint = "At the Battery low threshold" },
+      crit   = { label = "Battery critical",    hint = "At the Battery critical threshold" },
+      charge = { label = "Battery not charged", hint = "Pack already below Battery low when plugged in" },
     },
 
     check = function(v)
-      if v.warnPct <= v.critPct then return "Low must be above Critical" end
+      if v.warnPct <= v.critPct then return "Battery low must be above Battery critical" end
     end,
 
     resets = {

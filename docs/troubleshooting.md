@@ -44,7 +44,7 @@ The Flight Bag popup names the problem:
 - Check on the Flight Bag **Alerts** page that neither **Sounds** nor the warning's
   own sound is set to **Off**.
 - Check that the selected sound file exists in `/SOUNDS/en/SCRIPTS/LIPONY/`
-  (the defaults are `warn.wav` / `crit.wav`).
+  (the defaults are `warn.wav` / `crit.wav` / `charge.wav`).
 - Use the **Play** button next to each warning on the Flight Bag **Alerts** page to confirm playback.
 - Make sure the radio volume is up.
 

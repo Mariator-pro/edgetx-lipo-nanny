@@ -21,7 +21,7 @@ their own settings to them or bring further pages:
 
 | Page | What it does |
 |---|---|
-| **Warnings** | The global **Low** and **Critical** thresholds. |
+| **Warnings** | The global **Battery low** and **Battery critical** thresholds. |
 | **Alerts** | Sounds on/off, vibration and its strength (shared by all Flight Bag scripts), and the sound per warning with a **Play** test. |
 | **Batteries** | Your library of battery *profiles* (a model of battery) and their physical *packs*. |
 | **Models** | Per-model setup: cell count, single vs. parallel, which batteries are assigned, sensor mapping. |
@@ -52,8 +52,8 @@ physical **packs** that you actually fly and that accumulate cycles.
 | **Cells** | Cell count (S), **1–30**. Must match the model's cell count to be assignable. |
 | **Packs** | Opens the Packs sub-page (see below). |
 | **Statistics** | Opens the read-only Statistics sub-page (see below): per-pack lifetime mAh, lowest cell voltage, and last-used date. |
-| **Low** | Per-profile **warn** override (**1–99 %**). Shows `… % (default)` until you set one. Low and Critical are overridden **as a pair**: as soon as you change one, the other is pinned at its current global value too, so later changes to the global thresholds (Warnings page) no longer affect this profile. Dialing both back onto the global values clears the pair. |
-| **Critical** | Per-profile **critical** override. Same range and pair behaviour. Saving is blocked unless Low is above Critical. |
+| **Battery low** | Per-profile **warn** override (**1–99 %**). Shows `… % (default)` until you set one. Battery low and Battery critical are overridden **as a pair**: as soon as you change one, the other is pinned at its current global value too, so later changes to the global thresholds (Warnings page) no longer affect this profile. Dialing both back onto the global values clears the pair. |
+| **Battery critical** | Per-profile **critical** override. Same range and pair behaviour. Saving is blocked unless Battery low is above Battery critical. |
 
 Buttons: **Save**, **Back**, **Delete** (existing profiles only), and **Reset
 name** (only while the name is a manual override).
@@ -160,8 +160,8 @@ discarding changes.
 
 | Row | Notes |
 |---|---|
-| **Low** | The first voice warning, default **30 %** remaining (**1–99 %**). |
-| **Critical** | The second voice warning, default **20 %** (**1–99 %**). Saving is blocked unless **Low is above Critical**. |
+| **Battery low** | The first voice warning, default **30 %** remaining (**1–99 %**). |
+| **Battery critical** | The second voice warning, default **20 %** (**1–99 %**). Saving is blocked unless **Battery low is above Battery critical**. |
 
 **Alerts page**
 
@@ -173,9 +173,9 @@ were set differently before, the row shows **Mixed** until you choose a value.
 | **Sounds** | `On` (default) / `Off`. **Off** silences every warning at once, whatever each warning's sound is; vibration stays. The sound rows are then greyed out. |
 | **Vibration** | `On` / `Off` (default **Off**). When on, the radio buzzes alongside each voice warning. Has no effect on radios without a vibration motor. |
 | **Strength** | `Soft` / `Normal` (default) / `Strong`, setting the pulse length. Greyed out while **Vibration** is off. |
-| **Low** / **Critical** (sound) | Dive into the row to reach the sound and the **Play** button. The sound is **Off**, **Default** (the bundled `warn.wav` / `crit.wav`), or any custom `*.wav` you've dropped into `/SOUNDS/en/SCRIPTS/LIPONY/`, picked from a list. A selected file that later goes missing falls back to the default. **Off** silences **only that warning's voice**; with vibration on, the buzz still fires. **Play** plays the selected sound (and, with vibration on, its buzz: one pulse for Low, two for Critical), so you can check it exists and the volume is up. |
+| **Battery low** / **Battery critical** / **Battery not charged** (sound) | Dive into the row to reach the sound and the **Play** button. **Battery low** and **Battery critical** belong to the thresholds of the same name; **Battery not charged** plays once when a pack is already below Battery low as it is picked. The sound is **Off**, **Default** (the bundled `warn.wav` / `crit.wav` / `charge.wav`), or any custom `*.wav` you've dropped into `/SOUNDS/en/SCRIPTS/LIPONY/`, picked from a list. A selected file that later goes missing falls back to the default. **Off** silences **only that warning's voice**; with vibration on, the buzz still fires. **Play** plays the selected sound (and, with vibration on, its buzz: one pulse for Battery low and Battery not charged, two for Battery critical), so you can check it exists and the volume is up. |
 
-Per-profile **Low/Critical** overrides (above) take precedence over these global
+Per-profile **Battery low** / **Battery critical** overrides (above) take precedence over these global
 threshold values for that profile. Profiles from older versions that carry only one
 of the two values are completed automatically the first time the Batteries page opens (the
 missing value is pinned at the global value in effect at that moment).

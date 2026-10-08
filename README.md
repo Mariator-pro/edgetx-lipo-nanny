@@ -56,7 +56,7 @@ It solves three concrete problems:
 
 - At connect, the script reads the resting voltage, auto-selects the matching battery from a per-model library (or lets you pick when several fit), and estimates the starting state-of-charge from a chemistry-specific voltage curve (LiPo, LiPoHV, LiIon).
 - During flight, the FC-reported consumed-mAh counter (CRSF `Capa` by default) is offset by the start SoC, so remaining capacity reflects reality from the first second.
-- Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable. An optional **haptic buzz** (one pulse on warn, two on critical) can accompany them.
+- Two one-shot voice announcements fire on percentage thresholds: **warn** (default 30 %) and **critical** (default 20 %), both globally tunable and per-profile overridable. A pack that is already below the warn threshold when plugged in gets a **not charged** announcement instead. An optional **haptic buzz** (one pulse on warn and not charged, two on critical) can accompany them.
 - Per physical **pack** (#1, #2, …) the script keeps a **cycle count** plus read-only **statistics** (lifetime consumed mAh, lowest cell voltage seen, and the last-used date), all viewable per profile in the tool.
 - Each pack can carry a **wear %** that lowers its effective capacity, so an aging battery triggers the warnings **earlier**; there's no need to re-tune your thresholds as a battery gets tired. An optional **purchase date** per pack helps track battery age.
 
@@ -107,7 +107,7 @@ Besides the flight view above, the widget shows a page for each other phase of a
            └── LIPONY/         ← all .wav files
    ```
 
-   `warn.wav` and `crit.wav` ship with the project as the default voices. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Flight Bag → Alerts**, or set a warning to **Off** there to silence its voice. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
+   `warn.wav`, `crit.wav` and `charge.wav` ship with the project as the default voices. Drop additional named `*.wav` files into the same folder to pick them per warning under **Tools → Flight Bag → Alerts**, or set a warning to **Off** there to silence its voice. The WAVs always live under `/SOUNDS/en/SCRIPTS/LIPONY/` regardless of the radio's language setting; the script plays them by absolute path.
 
 2. **Restart the radio** (or reload Lua scripts) so EdgeTX picks up the new files.
 
