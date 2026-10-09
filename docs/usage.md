@@ -78,7 +78,7 @@ candidate is taken automatically.
   draw down to the **critical** threshold (you should be landing by then). The
   average only counts while armed and follows the last minute or so of flying.
   Shows `calc..` until 30 s of flying, and `--:--` if there's no current
-  sensor. Only on zones tall enough for it (not in the 2×2 quarter tile).
+  sensor or it only reads 0 A (FC without a current meter). Only on zones tall enough for it (not in the 2×2 quarter tile).
 - **REMAINING**: remaining capacity in mAh, shown as `X` `of Y mAh` (Y = the
   effective, wear-adjusted capacity).
 - **CONSUMED**: what you've actually drawn this flight (the raw mAh sensor).

@@ -48,7 +48,7 @@ local CONFIG_POLL_INTERVAL  = 500  -- 5 s in hundredths of a second (getTime())
 local SENSOR_CHECK_INTERVAL = 100  -- 1 s; sensor existence is model config, 1 s cache is plenty
 local TIME_LEFT_INTERVAL    = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
 local CURRENT_AVG_SAMPLES   = 600  -- 60 s at 10 Hz; time constant of the moving average current
-local TIME_LEFT_WARMUP      = 300  -- 30 s of flying samples before time-left is shown
+local TIME_LEFT_WARMUP      = 300  -- 30 s of flying before time-left is shown
 local SETTLE_DELAY          = 300  -- 3 s after PRE starts before sampling resting voltage and
                                    -- latching mAh — lets stale telemetry from the last flight clear
 
@@ -793,6 +793,7 @@ local function resetFlightState(ctx)
   ctx.chargePending       = false
   ctx.avgCurrent          = nil   -- moving average current while flying (A)
   ctx.currentSampleCount  = 0
+  ctx.flyingTicks         = 0     -- ticks flown, for the time-left warm-up
   ctx.timeLeftStr         = nil   -- recompute the displayed time-left promptly
   ctx.timeLeftStamp       = nil
   ctx.restVoltage         = nil
@@ -1003,6 +1004,7 @@ local function updateStateMachine(ctx, ready)
     -- text never shows the armed state. Plain mean for the first 60 s, then
     -- exponential with a 60 s time constant.
     local flying = ctx.armed or (not ctx.disarmSeen and ctx.phase == "FLIGHT")
+    if flying then ctx.flyingTicks = ctx.flyingTicks + 1 end
     if flying and ctx.current and ctx.current > 0 then
       local n = ctx.currentSampleCount + 1
       local avg = ctx.avgCurrent or 0
@@ -1112,11 +1114,11 @@ local function calculateTimeLeftSeconds(ctx)
   return restMah / 1000 / avgCurrent * 3600  -- mAh → Ah → h → s
 end
 
--- "calc.." until 30 s of flying samples, "--:--" when the value is
--- permanently uncalculable (e.g. Curr sensor missing), otherwise "mm:ss".
+-- "calc.." until 30 s of flying, "--:--" when the value is uncalculable
+-- (Curr sensor missing, or only 0 A while flying), otherwise "mm:ss".
 local function formatTimeLeft(ctx)
   if not ctx.hasCurr then return "--:--" end   -- no current sensor → not computable
-  if ctx.currentSampleCount < TIME_LEFT_WARMUP then return "calc.." end
+  if ctx.flyingTicks < TIME_LEFT_WARMUP then return "calc.." end
   local secs = calculateTimeLeftSeconds(ctx)
   if not secs then return "--:--" end
   local m = math.floor(secs / 60)
@@ -1594,6 +1596,7 @@ local function newContext()
     -- Time-left averaging
     avgCurrent = nil,
     currentSampleCount = 0,
+    flyingTicks = 0,
 
     -- Last flight summary for ENDED display
     lastFlight = nil,
