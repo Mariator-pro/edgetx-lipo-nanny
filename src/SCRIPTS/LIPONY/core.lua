@@ -47,6 +47,8 @@ Core.SCHEMA_VERSION = SCHEMA_VERSION
 local CONFIG_POLL_INTERVAL  = 500  -- 5 s in hundredths of a second (getTime())
 local SENSOR_CHECK_INTERVAL = 100  -- 1 s; sensor existence is model config, 1 s cache is plenty
 local TIME_LEFT_INTERVAL    = 200  -- 2 s; how often the DISPLAYED time-left is refreshed
+local CURRENT_AVG_SAMPLES   = 600  -- 60 s at 10 Hz; time constant of the moving average current
+local TIME_LEFT_WARMUP      = 300  -- 30 s of flying samples before time-left is shown
 local SETTLE_DELAY          = 300  -- 3 s after PRE starts before sampling resting voltage and
                                    -- latching mAh — lets stale telemetry from the last flight clear
 
@@ -789,7 +791,7 @@ local function resetFlightState(ctx)
   ctx.warnPlayed          = false
   ctx.critPlayed          = false
   ctx.chargePending       = false
-  ctx.currentSumA         = 0
+  ctx.avgCurrent          = nil   -- moving average current while flying (A)
   ctx.currentSampleCount  = 0
   ctx.timeLeftStr         = nil   -- recompute the displayed time-left promptly
   ctx.timeLeftStamp       = nil
@@ -996,11 +998,16 @@ local function updateStateMachine(ctx, ready)
        and (now - ctx.connectedSinceTime) >= SETTLE_DELAY then
       ctx.restVoltage = ctx.voltage
     end
-    -- Average-current accumulator for time-left: one validated-current
-    -- sample per tick (10 Hz).
-    if ctx.current and ctx.current > 0 then
-      ctx.currentSumA        = ctx.currentSumA + ctx.current
-      ctx.currentSampleCount = ctx.currentSampleCount + 1
+    -- Moving average current for time-left, one sample per tick (10 Hz), only
+    -- while flying so ground idle doesn't dilute it: armed, or FLIGHT when the FM
+    -- text never shows the armed state. Plain mean for the first 60 s, then
+    -- exponential with a 60 s time constant.
+    local flying = ctx.armed or (not ctx.disarmSeen and ctx.phase == "FLIGHT")
+    if flying and ctx.current and ctx.current > 0 then
+      local n = ctx.currentSampleCount + 1
+      local avg = ctx.avgCurrent or 0
+      ctx.currentSampleCount = n
+      ctx.avgCurrent = avg + (ctx.current - avg) / math.min(n, CURRENT_AVG_SAMPLES)
     end
     -- Lowest per-cell voltage this flight (statistics): tracked under load.
     if ctx.voltage and ctx.cells and ctx.cells > 0 then
@@ -1092,9 +1099,8 @@ end
 -- discharged, so the usable reserve is the charge ABOVE crit%. Returns 0 once at
 -- or below crit ("land now"). Pure data; warmup gating happens in formatTimeLeft.
 local function calculateTimeLeftSeconds(ctx)
-  if ctx.currentSampleCount == 0 then return nil end
-  local avgCurrent = ctx.currentSumA / ctx.currentSampleCount
-  if avgCurrent <= 0 then return nil end
+  local avgCurrent = ctx.avgCurrent
+  if not avgCurrent or avgCurrent <= 0 then return nil end
   local restPct = calculateRestPct(ctx)
   if not restPct then return nil end
   local effective = effectiveCapacityMah(ctx)
@@ -1106,12 +1112,11 @@ local function calculateTimeLeftSeconds(ctx)
   return restMah / 1000 / avgCurrent * 3600  -- mAh → Ah → h → s
 end
 
--- "calc.." during the first 60 s after PRE starts, "--:--" when the value is
+-- "calc.." until 30 s of flying samples, "--:--" when the value is
 -- permanently uncalculable (e.g. Curr sensor missing), otherwise "mm:ss".
 local function formatTimeLeft(ctx)
   if not ctx.hasCurr then return "--:--" end   -- no current sensor → not computable
-  local elapsedS = (getTime() - ctx.connectedSinceTime) / 100
-  if elapsedS < 60 then return "calc.." end
+  if ctx.currentSampleCount < TIME_LEFT_WARMUP then return "calc.." end
   local secs = calculateTimeLeftSeconds(ctx)
   if not secs then return "--:--" end
   local m = math.floor(secs / 60)
@@ -1121,7 +1126,7 @@ local function formatTimeLeft(ctx)
 end
 
 -- Refreshes the DISPLAYED time-left string at most every TIME_LEFT_INTERVAL (2 s).
--- The current average keeps accumulating every tick; this only throttles how often
+-- The current average keeps updating every tick; this only throttles how often
 -- it's snapshotted, so the mm:ss doesn't twitch on a momentary blip.
 local function refreshTimeLeft(ctx)
   local now = getTime()
@@ -1587,7 +1592,7 @@ local function newContext()
     chargePending = false,
 
     -- Time-left averaging
-    currentSumA = 0,
+    avgCurrent = nil,
     currentSampleCount = 0,
 
     -- Last flight summary for ENDED display

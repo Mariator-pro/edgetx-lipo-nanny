@@ -75,8 +75,9 @@ candidate is taken automatically.
   state of charge and shrunk by the pack's **Wear %**. Coloured green / yellow /
   red against the warn / critical thresholds.
 - **TIME LEFT**: estimated remaining flight time (mm:ss) from the average current
-  draw down to the **critical** threshold (you should be landing by then). Shows
-  `calc..` for the first 60 s while it averages, and `--:--` if there's no current
+  draw down to the **critical** threshold (you should be landing by then). The
+  average only counts while armed and follows the last minute or so of flying.
+  Shows `calc..` until 30 s of flying, and `--:--` if there's no current
   sensor. Only on zones tall enough for it (not in the 2×2 quarter tile).
 - **REMAINING**: remaining capacity in mAh, shown as `X` `of Y mAh` (Y = the
   effective, wear-adjusted capacity).
