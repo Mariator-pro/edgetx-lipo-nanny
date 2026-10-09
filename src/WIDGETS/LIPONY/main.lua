@@ -831,7 +831,7 @@ local function drawPreTile(ctx)
     return
   end
 
-  -- FULL: big per-cell value with the caption beside it, TOTAL right, then the threshold bar
+  -- FULL: big per-cell value with the caption beside it, TOTAL and the pack voltage right, then the threshold bar
   -- (WARN/CRIT captions when there is room), the status and the bottom row;
   -- the spare height is shared out evenly between the blocks.
   local top     = pad + smlH + METRIC_GAP
@@ -845,20 +845,13 @@ local function drawPreTile(ctx)
   local gap     = math.max(0, math.floor((bottomY - top - (fixed - barH + barBlk)) / 3))
   local vw      = drawValueUnit(pad, top, cell, "V", col, bigFlag, smallerFont(bigFlag))
   local tw      = textW(total, 0)
-  -- TOTAL above the value only when it clears the heartbeat dot, else beside it
-  local tcapY   = top + bigH - fontH(0) - smlH
-  local stacked = tcapY >= sx(12)
-  local rightW  = stacked and math.max(tw, textW("TOTAL", SMLSIZE)) or (textW("TOTAL", SMLSIZE) + sx(4) + tw)
+  local rightW  = textW("TOTAL", SMLSIZE) + sx(4) + tw
   local capX    = pad + vw + sx(6)
   if capX + textW("PER CELL", SMLSIZE) <= w - pad - rightW - sx(4) then
     dtext(capX, top + bigH - smlH, "PER CELL", COLORS.muted, SMLSIZE)
   end
   dtext(w - pad - tw, top + bigH - fontH(0), total, COLORS.fg, 0)
-  if stacked then
-    dtext(w - pad - textW("TOTAL", SMLSIZE), tcapY, "TOTAL", COLORS.muted, SMLSIZE)
-  else
-    dtext(w - pad - rightW, top + bigH - smlH, "TOTAL", COLORS.muted, SMLSIZE)
-  end
+  dtext(w - pad - rightW, top + bigH - smlH, "TOTAL", COLORS.muted, SMLSIZE)
   local blkY    = top + bigH + gap
   local barY    = blkY + (labels and (smlH + sx(1)) or math.floor((barBlk - barH) / 2))
   drawThresholdBar(pad, barY, w - 2 * pad, barH, m.restPct, m.warn, m.crit, labels)
