@@ -19,6 +19,7 @@ EdgeTX Lua script that tracks battery voltage and capacity, alerting the pilot b
 - [🎯 What is it for?](#-what-is-it-for)
 - [🧰 Requirements](#-requirements)
 - [📥 Installation](#-installation)
+- [⚙️ Customizing](#️-customizing)
 - [🛠️ Troubleshooting](#-troubleshooting)
 - [🤝 Contributing](#-contributing)
 - [⚠️ Disclaimer](#-disclaimer)
@@ -133,7 +134,13 @@ Besides the flight view above, the widget shows a page for each other phase of a
 > - **2×3**: half width, one third height. Slightly shorter, so the widget automatically switches to a more compact layout.
 > - **2×4**: half width, one quarter height. The shortest supported zone; it falls back to the most compact layout to stay readable.
 
-> All Flight Bag pages and rows: see the [Flight Bag guide](https://github.com/Mariator-pro/edgetx-flight-wingman/blob/main/docs/flightbag.md). In-flight usage: see [`docs/usage.md`](docs/usage.md).
+> In-flight usage: see [`docs/usage.md`](docs/usage.md).
+
+---
+
+## ⚙️ Customizing
+
+All settings are made in **Flight Bag**, the settings tool shared by Lipo Nanny, Link Sentinel, GPS Homer and Flight Wingman (**SYS → Tools → Apps → Flight Bag**). Thresholds, sounds, vibration and display options are set there; after **Save** they apply within a few seconds, no restart needed. Every page and row is described in the [Flight Bag guide](https://github.com/Mariator-pro/edgetx-flight-wingman/blob/main/docs/flightbag.md).
 
 ---
 
