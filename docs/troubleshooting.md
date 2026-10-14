@@ -22,7 +22,7 @@ These are normal, not errors; the widget is waiting for something:
 | Tile shows | Meaning / fix |
 |---|---|
 | `Core missing` / `Reinstall Lipo Nanny` | `/SCRIPTS/LIPONY/core.lua` wasn't copied to the SD card. It holds the shared logic. Copy it to `/SCRIPTS/LIPONY/` and restart. (Without it, Flight Bag doesn't list Lipo Nanny either.) |
-| `Configuration error` / `Please check Tool Flight Bag` | Something in the setup keeps the widget from working. Open **Tools → Flight Bag** and tap the Lipo Nanny icon (it carries a warning sign): the popup lists what is wrong. |
+| `Configuration error` / `Please check Tool Flight Bag` | Something in the setup keeps the widget from working. Open **Tools → Apps → Flight Bag** and tap the Lipo Nanny icon (it carries a warning sign): the popup lists what is wrong. |
 | `Widget error` | An internal fault. Restart the radio. If it persists, please [open an issue](../../issues). |
 
 The Flight Bag popup names the problem:

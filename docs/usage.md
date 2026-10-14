@@ -1,6 +1,6 @@
 # In-flight usage
 
-Once configured (see [configuration.md](configuration.md)) and placed on a
+Once configured (see the [Flight Bag guide](https://github.com/Mariator-pro/edgetx-flight-wingman/blob/main/docs/flightbag.md)) and placed on a
 telemetry screen, the **Lipo Nanny** widget runs on its own. Nothing to press in
 the air: it watches the battery and speaks up twice per flight.
 
