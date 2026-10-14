@@ -56,23 +56,17 @@ local function sx(v) return math.floor(v * S + 0.5) end
 -- boundary doesn't flip tier on a minor font-metric change.
 local TIER_TOL = sx(4)
 
--- Uniform vertical gap between the FULL tier's stacked rows (header/big number/
--- caption/value/sub-line), kept tight so a quarter-page tile still fits at FULL.
--- Used by drawConnectedFull, drawMetricBlock and connectedFitsFull — all three
--- must agree or the tier maths drift apart.
-local METRIC_GAP = sx(1)
-
 -- Two palettes, picked per frame by the "Theme" option (see refresh()). DARK paints
 -- a near-black panel; LIGHT stays transparent so the radio theme shows through.
--- `accent` is the "good"-state green (%/bar/glyph/voltage); warn/crit colours are
+-- `accent` is the "good"-state green (%/bar/voltage); warn/crit colours are
 -- theme-independent. Brand/heading colour is separate (BRAND, below) so the Accent
 -- option never touches these state colours.
 local DARK = {
   panel   = lcd.RGB( 18,  20,  18),   -- near-black background
-  accent  = lcd.RGB(124, 210,  48),   -- lime green (% / V / bar / glyph "ok" state)
+  accent  = lcd.RGB(124, 210,  48),   -- lime green (% / V / bar "ok" state)
   fg      = lcd.RGB(235, 235, 235),   -- primary readouts
   muted   = lcd.RGB(150, 150, 150),   -- captions / secondary lines
-  track   = lcd.RGB( 55,  58,  55),   -- bar/glyph empty track
+  track   = lcd.RGB( 55,  58,  55),   -- bar empty track
   transparent = false,
 }
 local LIGHT = {
@@ -195,7 +189,7 @@ local function formatBatteryLabel(name, instances)
 end
 
 -- ---------------------------------------------------------------------------
--- Live tile (PRE and FLIGHT): readouts, battery glyph and threshold bar, scaling down through
+-- Live tile (PRE and FLIGHT): readouts and threshold bar, scaling down through
 -- FULL → MEDIUM → SMALL tiers by zone size.
 -- ---------------------------------------------------------------------------
 
@@ -206,14 +200,6 @@ local function smallerFont(flag)
   if flag == DBLSIZE then return MIDSIZE end
   if flag == MIDSIZE then return 0       end
   return SMLSIZE
-end
-
--- Shrinks `flag` step by step until `text` fits within `maxW` (never below SMLSIZE).
-local function fitWidth(text, flag, maxW)
-  while flag ~= SMLSIZE and textW(text, flag) > maxW do
-    flag = smallerFont(flag)
-  end
-  return flag
 end
 
 -- Draws a number with its unit appended in a smaller font, bottom-aligned to the
@@ -237,35 +223,6 @@ local function drawHeaderLabel(x, y, label)
   local dot   = sx(5)
   lcd.drawFilledRectangle(x, y + math.floor((th - dot) / 2), dot, dot, BRAND)
   dtext(x + dot + sx(3), y, label, BRAND, SMLSIZE)
-end
-
--- Vertical battery glyph: a cap, an outlined body and `nSeg` segments filled from
--- the bottom up to `pct`, in `color`; the empty part stays on the track colour.
-local function drawBatteryGlyph(x, y, w, h, pct, color, nSeg)
-  nSeg = nSeg or 10                        -- segment count (FULL: 10, MID: 5)
-  local capH  = math.max(sx(3), math.floor(h * 0.07))
-  local capW  = math.floor(w * 0.45)
-  local bodyY = y + capH
-  local bodyH = h - capH
-  lcd.drawFilledRectangle(x + math.floor((w - capW) / 2), y, capW, capH, COLORS.muted)
-  lcd.drawRectangle(x, bodyY, w, bodyH, COLORS.muted)
-  lcd.drawRectangle(x + 1, bodyY + 1, w - 2, bodyH - 2, COLORS.muted)
-  local inset   = sx(3)
-  local ix, iw  = x + inset, w - 2 * inset
-  local iy, ih  = bodyY + inset, bodyH - 2 * inset
-  local gap     = sx(1)
-  local filled  = math.floor((pct or 0) / 100 * nSeg + 0.5)
-  -- Gaps go only BETWEEN segments (nSeg-1 of them); the segment area is split into
-  -- nSeg equal rounded slots so the stack is flush at both the top and the bottom.
-  local segArea = ih - (nSeg - 1) * gap
-  for k = 1, nSeg do                       -- k = 1 is the TOP segment
-    local top  = iy + math.floor(segArea * (k - 1) / nSeg + 0.5) + (k - 1) * gap
-    local bot  = iy + math.floor(segArea * k       / nSeg + 0.5) + (k - 1) * gap
-    local segH = bot - top
-    if segH < 1 then segH = 1 end
-    local fromBottom = nSeg - k + 1        -- 1 = bottom segment
-    lcd.drawFilledRectangle(ix, top, iw, segH, (fromBottom <= filled) and color or COLORS.track)
-  end
 end
 
 -- Horizontal threshold bar: track, coloured fill, yellow/red tick marks at
@@ -299,262 +256,6 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   end
 end
 
--- A metric column: big number+unit (bottom-aligned to `bigBottom`), then caption,
--- value and sub-line. Both columns share `bigBottom` so their rows line up even
--- when the two big numbers use different font sizes.
-local function drawMetricBlock(x, bigBottom, big, unit, bigColor, capLine, valLine, subLine, bigFlag, colW)
-  local bigH = fontH(bigFlag)
-  drawValueUnit(x, bigBottom - bigH, big, unit, bigColor, bigFlag, smallerFont(bigFlag))
-  -- Caption / value / sub-line separated by one uniform gap, each placed at its
-  -- own measured height (a fixed line height would drift across screens).
-  local gap     = METRIC_GAP
-  local capH = fontH(SMLSIZE)
-  -- Value line is the only element in a real (non-SMLSIZE) font, so shrink it to
-  -- the column width instead of letting e.g. "1500 mAh" spill over.
-  local valFlag = fitWidth(valLine, 0, colW)
-  local valH = fontH(valFlag)
-  local y = bigBottom + gap
-  dtext(x, y, capLine, COLORS.muted, SMLSIZE)
-  y = y + capH + gap
-  dtext(x, y, valLine, COLORS.fg, valFlag)
-  y = y + valH + gap
-  dtext(x, y, subLine, COLORS.muted, SMLSIZE)
-end
-
--- Colour for the live voltage readout: green/yellow/red from the chemistry's
--- per-cell voltage thresholds. Falls back to the accent green when
--- voltage/cells/chemistry are unavailable.
-local function voltageColor(ctx)
-  local lvl = core.voltageLevel(ctx)
-  if lvl == nil then return COLORS.fg end   -- missing value: neutral, not OK
-  return (lvl == 0 and COLORS.accent) or (lvl == 1 and WARN_COL) or CRIT_COL
-end
-
--- Builds the display strings/colours once for the live tile metrics.
-local function connectedMetrics(ctx)
-  local restPct    = core.calculateRestPct(ctx)
-  local warn, crit = core.getThresholds(ctx)
-  local effective  = core.effectiveCapacityMah(ctx)
-  -- `used` includes the pre-flight start offset (drives remaining %/mAh); the
-  -- CONSUMED display shows only ctx.capacity, the in-flight telemetry value.
-  local used       = (ctx.capacity and ctx.startOffsetMah) and (ctx.capacity + ctx.startOffsetMah) or nil
-  local remaining  = (effective and used) and math.max(0, effective - used) or nil
-  local profile    = ctx.selectedProfile and ctx.selectedProfile.name or nil
-  return {
-    restPct  = restPct,
-    warn     = warn,
-    crit     = crit,
-    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.fg,   -- missing: neutral
-    vColor   = voltageColor(ctx),
-    label    = formatBatteryLabel(profile, ctx.selectedInstances),
-    pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
-    vText    = ctx.voltage and string.format("%.1f", ctx.voltage) or "--.-",
-    vCell    = (ctx.voltage and ctx.cells and ctx.cells > 0)
-               and string.format("%.2f V/cell", ctx.voltage / ctx.cells) or "--.- V/cell",
-    remText  = remaining and string.format("%d mAh", math.floor(remaining + 0.5)) or "-- mAh",
-    ofText   = effective and string.format("of %d mAh", math.floor(effective + 0.5)) or "",
-    consText = ctx.capacity and string.format("%d mAh", math.floor(ctx.capacity + 0.5)) or "-- mAh",
-    timeLeft = ctx.timeLeftStr or core.formatTimeLeft(ctx),  -- 2 s-throttled snapshot
-  }
-end
-
--- Remaining-flight-time mini-block: a centred "TIME LEFT" caption above the mm:ss
--- value. flightTimeBlockH() returns its total height (and the caption height) so
--- the caller can decide whether it fits and where to centre it.
-local TIME_VAL_FLAG = MIDSIZE
-local function flightTimeBlockH()
-  local capH = fontH(SMLSIZE)
-  local valH = fontH(TIME_VAL_FLAG)
-  return capH + sx(1) + valH, capH
-end
-local function drawFlightTimeBlock(cx, top, value)
-  local _, capH = flightTimeBlockH()
-  dtext(cx, top, "TIME LEFT", COLORS.muted, SMLSIZE + CENTER)
-  dtext(cx, top + capH + sx(1), value, COLORS.fg, TIME_VAL_FLAG + CENTER)
-end
-
--- Widest fixed (SMLSIZE) line a metric column must hold, so a column narrower than
--- this would clip "of 0000 mAh" / "0.00 V/cell".
-local function minColW()
-  return math.max(textW("of 0000 mAh", SMLSIZE),
-                  textW("0.00 V/cell", SMLSIZE))
-end
-
--- FULL-tier column geometry: glyph is a fixed 19% of width `w`, the two text columns
--- split the rest. Returns (colW, glyphW, colGap); shared by renderer and tier picker.
-local function fullColumns(w)
-  local pad      = sx(4)
-  local colGap   = sx(6)
-  local gW       = math.floor(w * 0.19)
-  local colW     = math.floor((w - 2 * pad - gW - 2 * colGap) / 2)
-  return colW, gW, colGap
-end
-
--- FULL tier: header, two metric columns and the battery glyph. The threshold bar
--- is added only if there's enough free height below the content.
-local function drawConnectedFull(w, h, m)
-  local pad        = sx(4)
-  drawHeaderLabel(pad, pad, m.label)
-  local hdrH    = fontH(SMLSIZE)   -- actual header height (SMLSIZE)
-  local midTop     = pad + hdrH + METRIC_GAP
-  local contentBot = h - pad
-  local midH       = contentBot - midTop
-  local colW, gW, colGap = fullColumns(w)
-  local gX         = w - pad - gW
-  local maxBigH    = math.floor(midH * 0.5)
-  -- Size % from a fixed "100%" reference so "1%" isn't bigger than "100%"; V is
-  -- one step smaller (shrunk further only if it overflows).
-  local pctFlag    = pickFont("100%", colW, maxBigH, MIDSIZE)   -- at most MIDSIZE, like Link Sentinel's %
-  local vFlag      = fitWidth(m.vText .. "V", smallerFont(pctFlag), colW)
-  -- Shared bottom edge for both big numbers (= the taller, % one) so the rows
-  -- beneath them align across the two columns.
-  local pctH    = fontH(pctFlag)
-  local bigBottom  = midTop + pctH
-  drawMetricBlock(pad, bigBottom, m.pctText, "%", m.pctColor,
-                  "REMAINING", m.remText, m.ofText, pctFlag, colW)
-  drawMetricBlock(pad + colW + colGap, bigBottom, m.vText, "V", m.vColor,
-                  m.vCell, m.consText, "CONSUMED", vFlag, colW)
-  local smlH    = fontH(SMLSIZE)
-  local valH    = fontH(0)   -- value row (default font)
-  -- Mirror drawMetricBlock's uniform-gap stack: bottom of the CONSUMED/"of … mAh" line.
-  local textBottom = bigBottom + METRIC_GAP + smlH + METRIC_GAP + valH + METRIC_GAP + smlH
-  -- Threshold bar pinned to the bottom if it fits below the content (with labels,
-  -- one line above/below for WARN/CRIT). Resolved before the glyph so the glyph
-  -- knows whether anything sits below it.
-  local barH       = sx(8)
-  local roomBelow  = contentBot - textBottom
-  local hasBar     = roomBelow >= barH + sx(4)
-  local withLabels = hasBar and roomBelow >= barH + 2 * smlH + sx(4)
-  local barY, barTop = nil, contentBot   -- barTop = bottom of the time-block area
-  if hasBar then
-    barY   = contentBot - (withLabels and smlH or 0) - barH
-    barTop = barY - (withLabels and smlH or 0)   -- top of the bar block (incl. WARN label)
-  end
-  local tlH        = flightTimeBlockH()
-  local hasTime    = (barTop - textBottom) >= tlH
-  -- Glyph bottom = same inset (pad) as the right edge (ends at h-pad), unless the bar
-  -- or flight-time block sits below — then it ends at the text so it doesn't overlap.
-  local gBottom    = (hasBar or hasTime) and textBottom or contentBot
-  if gW > 0 then
-    drawBatteryGlyph(gX, midTop, gW, gBottom - midTop, m.restPct, m.pctColor)
-  end
-  if hasBar then
-    drawThresholdBar(pad, barY, w - 2 * pad, barH, m.restPct, m.warn, m.crit, withLabels)
-  end
-  -- Remaining flight time, centred in the gap between the content and the bar.
-  if hasTime then
-    local ty = textBottom + math.floor(((barTop - textBottom) - tlH) / 2)
-    drawFlightTimeBlock(math.floor(w / 2), ty, m.timeLeft)
-  end
-end
-
--- MEDIUM tier: the FULL two-column content (header, %/V, labels, mAh, of-X/CONSUMED)
--- all at SMLSIZE with a slim glyph, so 5 rows fit a short 1/6 tile.
-local function drawConnectedMedium(w, h, m)
-  local pad           = sx(4)   -- same edge inset as FULL/ENDED so the header doesn't shift on tier change
-  drawHeaderLabel(pad, pad, m.label)
-  local smlH       = fontH(SMLSIZE)
-  -- 5 rows spread evenly between top/bottom pad; each row's y is computed directly
-  -- from the total span (not accumulated) so rounding never piles onto the last row.
-  local span          = h - 2 * pad - smlH
-  if span < 4 * (smlH - 4) then span = 4 * (smlH - 4) end
-  local function rowY(i) return pad + math.floor(i * span / 4 + 0.5) end
-  -- Slim glyph (~12% width) on the right, same sx(4) margins as FULL.
-  local gm            = sx(4)
-  local glyphGap      = sx(4)
-  local gW            = math.floor(w * 0.12)
-  local colW          = math.floor((w - 2 * pad - glyphGap - gW - gm) / 2)
-  local leftX, rightX = pad, pad + colW + pad
-  -- Glyph top at the first metric row; bottom uses the same inset as the right edge.
-  local gTop          = rowY(1)
-  drawBatteryGlyph(w - gm - gW, gTop, gW, (h - gm) - gTop, m.restPct, m.pctColor, 5)
-  dtext(leftX,  rowY(1), m.pctText .. " %", m.pctColor, SMLSIZE)
-  dtext(rightX, rowY(1), m.vText .. " V",   m.vColor,   SMLSIZE)
-  dtext(leftX,  rowY(2), "REMAINING", COLORS.muted, SMLSIZE)
-  dtext(rightX, rowY(2), m.vCell,     COLORS.muted, SMLSIZE)
-  dtext(leftX,  rowY(3), m.remText,  COLORS.fg, SMLSIZE)
-  dtext(rightX, rowY(3), m.consText, COLORS.fg, SMLSIZE)
-  dtext(leftX,  rowY(4), m.ofText,   COLORS.muted, SMLSIZE)
-  dtext(rightX, rowY(4), "CONSUMED",  COLORS.muted, SMLSIZE)
-end
-
--- SMALL tier: like MEDIUM but with an adaptive row count (no glyph); all SMLSIZE
--- except %/V, which scales to the row height. Rows kept by priority: %/V, header,
--- REMAINING/V-cell, mAh values, of-X/CONSUMED (dropped first).
-local function drawConnectedSmall(w, h, m)
-  local pad     = sx(4)   -- match FULL/MEDIUM/ENDED edge inset (consistent header)
-  local gap     = 2
-  local smlH = fontH(SMLSIZE)
-  local avail   = h - 2 * pad
-  local colW          = math.floor((w - 3 * pad) / 2)   -- full width, no glyph column
-  local leftX, rightX = pad, pad + colW + pad
-
-  -- Rows are counted as if every row were smlH tall, so the header (priority 2)
-  -- survives on short zones instead of being crowded out by a large %/V line.
-  local nRows = math.floor((avail + gap) / (smlH + gap))
-  if nRows < 1 then nRows = 1 end
-  if nRows > 5 then nRows = 5 end
-
-  -- %/V line absorbs the leftover height (capped to ~2 lines) so it grows on taller
-  -- tiles without displacing other rows. Both share one size so % and V match.
-  local rowsBaseH = nRows * smlH + (nRows - 1) * gap
-  local extra     = math.max(0, avail - rowsBaseH)
-  local pctS, vS  = m.pctText .. " %", m.vText .. " V"
-  local bigRef    = (textW(pctS, SMLSIZE) >= textW(vS, SMLSIZE)) and pctS or vS
-  local bigFlag   = pickFont(bigRef, colW, math.min(smlH + extra, 2 * smlH))
-  local bigH   = fontH(bigFlag)
-
-  local function pairDraw(lt, lc, rt, rc)
-    return function(y)
-      dtext(leftX,  y, lt, lc, SMLSIZE)
-      dtext(rightX, y, rt, rc, SMLSIZE)
-    end
-  end
-  -- Candidates in PRIORITY order; `ord` is the on-screen position (top = 1). Each
-  -- carries its own height `h` so the block stacks compactly (bigPair is taller).
-  local cand = {
-    { ord = 2, h = bigH, draw = function(y)
-        dtext(leftX,  y, pctS, m.pctColor, bigFlag)
-        dtext(rightX, y, vS,   m.vColor,   bigFlag)
-        -- without the REMAINING row the caption sits beside the % (short LEFT), when it fits
-        local capX = leftX + textW(pctS, bigFlag) + sx(6)
-        if nRows < 3 then
-          local cap = "REMAINING"
-          if capX + textW(cap, SMLSIZE) > rightX - sx(4) then cap = "LEFT" end
-          if capX + textW(cap, SMLSIZE) <= rightX - sx(4) then
-            dtext(capX, y + bigH - smlH, cap, COLORS.muted, SMLSIZE)
-          end
-        end
-      end },
-    { ord = 1, h = smlH, draw = function(y) drawHeaderLabel(pad, y, m.label) end },
-    { ord = 3, h = smlH, draw = pairDraw("REMAINING", COLORS.muted, m.vCell, COLORS.muted) },
-    { ord = 4, h = smlH, draw = pairDraw(m.remText, COLORS.fg, m.consText, COLORS.fg) },
-    { ord = 5, h = smlH, draw = pairDraw(m.ofText, COLORS.muted, "CONSUMED", COLORS.muted) },
-  }
-  local rows = {}
-  for i = 1, nRows do rows[i] = cand[i] end        -- keep the top nRows by priority
-  table.sort(rows, function(a, b) return a.ord < b.ord end)
-
-  -- Header (ord 1, if present) pins to the top edge; the remaining rows form a
-  -- compact block centred below it, so the readout never sticks to the bottom edge.
-  local first = 1
-  local topY  = pad
-  if rows[1] and rows[1].ord == 1 then
-    rows[1].draw(pad)
-    topY  = pad + rows[1].h + gap
-    first = 2
-  end
-  local restH = 0
-  for i = first, #rows do
-    restH = restH + rows[i].h + (i > first and gap or 0)
-  end
-  local y = topY + math.max(0, math.floor(((h - pad - topY) - restH) / 2))
-  for i = first, #rows do
-    rows[i].draw(y)
-    y = y + rows[i].h + gap
-  end
-end
-
 -- Pulsing red dot, top-right (fades in and out every 2 s); the caller draws it only
 -- while telemetry is arriving. drawFilledCircle has no opacity, so the colour is
 -- blended by hand between the background and red (light theme: white, the real
@@ -570,40 +271,226 @@ local function drawHeartbeat(ctx)
   lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, lcd.RGB(mix(1), mix(2), mix(3)))
 end
 
--- True when the FULL two-column layout fits the zone. Checked in absolute pixels
--- because fonts don't scale with S (only positions do): each column must fit its
--- longest fixed (SMLSIZE) line, and the zone must be tall enough for header +
--- MIDSIZE big number + three sub-rows. Using real font metrics keeps this
--- self-tuning across screen sizes instead of a magic constant.
-local function connectedFitsFull(w, h)
-  if fullColumns(w) < minColW() - TIER_TOL then return false end   -- same px slack as the height check
-  local pad     = sx(4)
-  local hdrH = fontH(SMLSIZE)
-  local bigH = fontH(MIDSIZE)
-  local smlH = fontH(SMLSIZE)
-  local valH = fontH(0)   -- value row uses the default font
-  -- Mirror drawMetricBlock's uniform-gap stack: header, big number, caption, value,
-  -- sub-line — each gap METRIC_GAP, each row at its real height (smlH/valH/MIDSIZE).
-  local needH   = pad + hdrH + METRIC_GAP + bigH + METRIC_GAP + smlH + METRIC_GAP + valH + METRIC_GAP + smlH + pad
-  return h >= needH - TIER_TOL
+-- Colour for the voltage readouts: green/yellow/red from the chemistry's per-cell
+-- voltage thresholds, neutral when voltage/cells/chemistry are unavailable.
+local function voltageColor(ctx)
+  local lvl = core.voltageLevel(ctx)
+  if lvl == nil then return COLORS.fg end   -- missing value: neutral, not OK
+  return (lvl == 0 and COLORS.accent) or (lvl == 1 and WARN_COL) or CRIT_COL
 end
 
--- Picks the tier by what fits the zone. FULL is used whenever its content fits
--- (its bar labels/time-left block degrade on their own when height is tight);
--- shorter/narrower zones fall back to MEDIUM/SMALL.
-local function drawConnectedTile(ctx)
-  local w, h = ctx.zone.w, ctx.zone.h
-  local m    = connectedMetrics(ctx)
-  -- MID only when its 5 SMLSIZE rows fit (pad=2, min pitch smlH-4); else SMALL.
-  -- Constants must match drawConnectedMedium / drawConnectedSmall.
+-- Capacity and current, "--" when missing; large values in a shorter form so
+-- they keep their column width: 10000 mAh and up in Ah, 100 A and up without
+-- the decimal.
+local function fmtMah(v)
+  if not v then return "--" end
+  local mah = math.floor(v + 0.5)
+  return (mah >= 10000) and string.format("%.1f Ah", mah / 1000) or string.format("%d mAh", mah)
+end
+local function fmtAmps(v)
+  if not v then return "--" end
+  return (v >= 99.95) and string.format("%d A", math.floor(v + 0.5)) or string.format("%.1f A", v)
+end
+
+-- Builds the display strings/colours once for the live tile metrics.
+local function connectedMetrics(ctx)
+  local restPct    = core.calculateRestPct(ctx)
+  local warn, crit = core.getThresholds(ctx)
+  local effective  = core.effectiveCapacityMah(ctx)
+  -- `used` includes the pre-flight start offset (drives remaining %/mAh)
+  local used       = (ctx.capacity and ctx.startOffsetMah) and (ctx.capacity + ctx.startOffsetMah) or nil
+  local remaining  = (effective and used) and math.max(0, effective - used) or nil
+  local profile    = ctx.selectedProfile and ctx.selectedProfile.name or nil
+  return {
+    restPct  = restPct,
+    warn     = warn,
+    crit     = crit,
+    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.fg,   -- missing: neutral
+    vColor   = voltageColor(ctx),
+    label    = formatBatteryLabel(profile, ctx.selectedInstances),
+    pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
+    packText = ctx.voltage and string.format("%.1f V", ctx.voltage) or "--",
+    cellText = (ctx.voltage and ctx.cells and ctx.cells > 0)
+               and string.format("%.2f V", ctx.voltage / ctx.cells) or "--",
+    leftText = fmtMah(remaining),
+    currText = fmtAmps(ctx.current),
+    timeLeft = ctx.timeLeftStr or core.formatTimeLeft(ctx),  -- 2 s-throttled snapshot
+  }
+end
+
+-- Time beside the %, chosen in the settings tool: Timer 1 (none while it is off)
+-- or the remaining flight time. Returns label, value.
+local function flightTime(ctx, m)
+  if ctx.config and ctx.config.flightTime == "timeleft" then return "TIME LEFT ", m.timeLeft end
+  local t = model.getTimer and model.getTimer(0)
+  if not (t and t.mode ~= 0) then return nil end
+  local sec  = t.value
+  local sign = (sec < 0) and "-" or ""
+  sec = math.abs(sec)
+  return "TIMER ", string.format("%s%02d:%02d", sign, math.floor(sec / 60), sec % 60)
+end
+
+-- Muted label followed by its value (text colour unless `col` is given).
+local function drawKV(x, y, label, value, col)
+  dtext(x, y, label, COLORS.muted, SMLSIZE)
+  dtext(x + textW(label, SMLSIZE), y, value, col or COLORS.fg, SMLSIZE)
+end
+
+-- Vertical-center offset for a SMLSIZE row.
+local function vcenter(ry, rh)
+  return ry + math.floor((rh - fontH(SMLSIZE)) / 2)
+end
+
+-- Info grid (2 rows x 2 cols). Column 2 starts at the middle, or right of the
+-- widest column-1 content on a narrow zone.
+local GRID_A, GRID_B = "LEFT 0000 mAh", "CURRENT 00.0 A"
+local function gridW()
+  return textW(GRID_A, SMLSIZE) + sx(4) + textW(GRID_B, SMLSIZE)
+end
+local function gridCol2(x0, W)
+  return x0 + math.max(math.floor(W / 2), textW(GRID_A, SMLSIZE) + sx(4))
+end
+local function drawInfoRow1(x0, W, y, m)
+  drawKV(x0, y, "PACK ", m.packText, m.vColor)
+  drawKV(gridCol2(x0, W), y, "CELL ", m.cellText, m.vColor)
+end
+local function drawInfoGrid(x0, W, r1y, r2y, m)
+  drawInfoRow1(x0, W, r1y, m)
+  drawKV(x0, r2y, "LEFT ", m.leftText)
+  drawKV(gridCol2(x0, W), r2y, "CURRENT ", m.currText)
+end
+
+-- Caption on the percent baseline: the flight time right-aligned (priority),
+-- the label after the percent degrading REMAINING -> REMAIN -> dropped as the
+-- row tightens, so it never collides with the time.
+local function drawPctCaption(x0, W, pctBottom, labelX, m)
+  local capY = pctBottom - fontH(SMLSIZE)
+  local tX   = x0 + W
+  if m.timeLabel then
+    tX = tX - (textW(m.timeLabel, SMLSIZE) + textW(m.timeValue, SMLSIZE))
+    drawKV(tX, capY, m.timeLabel, m.timeValue)
+  end
+  local avail = tX - sx(4) - labelX
+  local lbl   = "REMAINING"
+  if textW(lbl, SMLSIZE) > avail then lbl = "REMAIN" end
+  if textW(lbl, SMLSIZE) <= avail then dtext(labelX, capY, lbl, COLORS.muted, SMLSIZE) end
+end
+
+-- Percent row for MEDIUM/SMALL: "value %" one size, caption on its baseline.
+-- Returns the y just below the percent (the top of the bar slot).
+local function drawPctRow(x0, W, top, maxH, m)
+  local pctTxt  = m.pctText .. " %"
+  local numFlag = pickFont("100 %", W * 0.5, maxH, MIDSIZE)
+  dtext(x0, top, pctTxt, m.pctColor, numFlag)
+  local pctBottom = top + fontH(numFlag)
+  drawPctCaption(x0, W, pctBottom, x0 + textW(pctTxt, numFlag) + sx(6), m)
+  return pctBottom
+end
+
+local function drawBar(x, y, w, h, m)
+  drawThresholdBar(x, y, w, h, m.restPct, m.warn, m.crit, false)
+end
+
+-- FULL tier: header, percent block (big % + threshold bar) and the 2x2 info grid.
+local function drawConnectedFull(W, H, x0, y0, m)
+  drawHeaderLabel(x0, y0, m.label)
+  -- Below the header: percent block, a gap, then 2 info rows, each at least one
+  -- line tall so the rows never crowd up into the bar on a short zone.
+  local smlH     = fontH(SMLSIZE)
+  local top      = y0 + smlH + sx(1)
+  local rest     = (y0 + H) - top
+  local infoGap  = sx(3)
+  local hInfoRow = math.max(math.floor(rest * 0.20), smlH)
+  local hPct     = rest - 2 * hInfoRow - infoGap
+  -- Bar takes ~42% of the block, capped so the band above always fits a MIDSIZE number.
+  local barH  = math.max(sx(10), math.min(math.floor(hPct * 0.42), hPct - fontH(MIDSIZE) - sx(3)))
+  local barY  = top + hPct - barH
+  local bandH = barY - sx(1) - top
+  -- Big percent anchored to the top, sized from "100" so "1" isn't bigger.
+  local numFlag = pickFont("100", W * 0.5, bandH, MIDSIZE)
+  local pctW    = drawValueUnit(x0, top, m.pctText, "%", m.pctColor, numFlag, smallerFont(numFlag))
+  drawPctCaption(x0, W, top + fontH(numFlag), x0 + pctW + sx(6), m)
+  drawBar(x0, barY, W, barH, m)
+  local gy = top + hPct + infoGap
+  drawInfoGrid(x0, W, vcenter(gy, hInfoRow), vcenter(gy + hInfoRow, hInfoRow), m)
+end
+
+-- MEDIUM tier: header and 4 rows evenly spread (%, bar, 2 info rows); on a short
+-- zone the pitch is floored so the last row sits at the bottom pad.
+local function drawConnectedMedium(W, H, x0, y0, m)
+  drawHeaderLabel(x0, y0, m.label)
   local smlH    = fontH(SMLSIZE)
-  local fiveRowMin = 2 * 2 + smlH + 4 * (smlH - 4)
-  if connectedFitsFull(w, h) then
-    drawConnectedFull(w, h, m)
-  elseif h >= fiveRowMin - TIER_TOL then
-    drawConnectedMedium(w, h, m)
+  local span    = H - smlH
+  local minSpan = 4 * (smlH - sx(5))   -- the pitch connectedFitsMedium allows
+  if span < minSpan then span = minSpan end
+  local function rowY(i) return y0 + math.floor(i * span / 4 + 0.5) end
+  local top, row1Y = rowY(1), rowY(3)
+  drawInfoGrid(x0, W, row1Y, rowY(4), m)
+  local barTop = drawPctRow(x0, W, top, math.floor((row1Y - sx(2) - top) * 0.5), m)
+  drawBar(x0, barTop, W, math.max(sx(8), (row1Y - sx(1)) - barTop), m)
+end
+
+-- SMALL tier, by the number of full-height rows that fit:
+--   >= 3 rows : header + % row + bar (+ PACK/CELL row when a 4th fits)
+--   2 rows    : header + the % row
+--   <= 1 row  : just a large %
+-- The % is coloured by the thresholds, so the colour still carries the state.
+local function drawConnectedSmall(W, H, x0, y0, m)
+  local smlH  = fontH(SMLSIZE)
+  local gap   = sx(1)
+  local nRows = math.floor((H + gap) / (smlH + gap))
+  if nRows <= 2 then
+    if nRows <= 1 then
+      local txt = m.pctText .. " %"
+      local f   = pickFont(txt, W, H)
+      dtext(x0, y0 + math.floor((H - fontH(f)) / 2), txt, m.pctColor, f)
+    else
+      drawHeaderLabel(x0, y0, m.label)
+      local restTop = y0 + smlH + gap
+      drawPctRow(x0, W, restTop, (y0 + H) - restTop, m)
+    end
+    return
+  end
+  local nInfo   = (nRows >= 4) and 1 or 0
+  local divisor = 2 + nInfo
+  local span    = H - smlH
+  local function rowY(i) return y0 + math.floor(i * span / divisor + 0.5) end
+  drawHeaderLabel(x0, y0, m.label)
+  local top   = rowY(1)
+  local infoY = (nInfo >= 1) and rowY(3) or nil
+  if infoY then drawInfoRow1(x0, W, infoY, m) end
+  local barTop = drawPctRow(x0, W, top, math.floor(((infoY or (y0 + H)) - sx(2) - top) * 0.5), m)
+  local barBot = (infoY and (infoY - sx(1))) or (y0 + H)
+  drawBar(x0, barTop, W, math.max(sx(8), barBot - barTop), m)
+end
+
+-- Tier checks in absolute pixels (fonts don't scale with S, only positions do), on
+-- the zone without its pad. FULL: header + gap, percent band + min bar, info gap +
+-- two info rows. MEDIUM: header + four rows at a compressed pitch. Both need the
+-- info grid's width.
+local function connectedFitsFull(W, H)
+  local smlH  = fontH(SMLSIZE)
+  local needH = smlH + sx(1) + fontH(MIDSIZE) + sx(1) + sx(12) + sx(3) + 2 * smlH
+  return W >= gridW() - TIER_TOL and H >= needH - TIER_TOL
+end
+local function connectedFitsMedium(W, H)
+  local smlH = fontH(SMLSIZE)
+  return W >= gridW() - TIER_TOL and H >= smlH + 4 * (smlH - sx(5)) - TIER_TOL
+end
+
+-- Live tile in flight: FULL, MEDIUM or SMALL by what fits the zone.
+local function drawConnectedTile(ctx)
+  local pad    = sx(4)
+  local x0, y0 = pad, pad
+  local W, H   = ctx.zone.w - 2 * pad, ctx.zone.h - 2 * pad
+  local m      = connectedMetrics(ctx)
+  m.timeLabel, m.timeValue = flightTime(ctx, m)
+  if connectedFitsFull(W, H) then
+    drawConnectedFull(W, H, x0, y0, m)
+  elseif connectedFitsMedium(W, H) then
+    drawConnectedMedium(W, H, x0, y0, m)
   else
-    drawConnectedSmall(w, h, m)
+    drawConnectedSmall(W, H, x0, y0, m)
   end
 end
 
@@ -717,8 +604,8 @@ end
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
--- Preflight and end pages (flight phases PRE and ENDED): the content of Flight
--- Wingman's battery column, header and margins as on the live tile.
+-- Preflight and end pages (flight phases PRE and ENDED), header and margins as
+-- on the live tile.
 -- ---------------------------------------------------------------------------
 
 -- Colour of a check level: 0 accent, 1 yellow, 2 red.
@@ -792,14 +679,14 @@ local function drawPreTile(ctx)
     if secs then drawCountdown(pad, w - 2 * pad, y, secs, core.PRE_HOLD_T / 1000, "Flight page") end
   end
 
-  if not connectedFitsFull(w, h) then
+  if not connectedFitsFull(w - 2 * pad, h - 2 * pad) then
     local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
-    -- rows as on Link Sentinel and GPS Homer: voltage, bar, status, countdown; with
-    -- three rows the countdown joins the status line, with two the bar goes too
+    -- rows: voltage, bar, status, countdown; with three rows the countdown joins
+    -- the status line, with two the bar goes too
     local k    = math.max(1, math.min(4, n))
     local rowY = rowSpread(h, pad, k)
     local bar  = k >= 3 and 1 or 0
-    -- value row as on Link Sentinel: value + unit coloured (up to MIDSIZE),
+    -- value row: value + unit coloured (up to MIDSIZE),
     -- PER CELL muted beside it, TOTAL muted before the pack voltage on the right
     local top    = rowY(1)
     local valTxt = cell .. " V"
@@ -834,7 +721,7 @@ local function drawPreTile(ctx)
   -- FULL: big per-cell value with the caption beside it, TOTAL and the pack voltage right, then the threshold bar
   -- (WARN/CRIT captions when there is room), the status and the bottom row;
   -- the spare height is shared out evenly between the blocks.
-  local top     = pad + smlH + METRIC_GAP
+  local top     = pad + smlH + sx(1)
   local bigFlag = pickFont("0.00V", math.floor((w - 2 * pad) * 0.5), math.floor((bottomY - top) * 0.4))
   local bigH    = fontH(bigFlag)
   local barH    = sx(8)
@@ -892,12 +779,12 @@ local function drawEndedTile(ctx)
   local cycles = {}
   for _, inst in ipairs(lf.instances or {}) do cycles[#cycles + 1] = tostring(core.cyclesFor(ctx, inst.id)) end
   local rows = {
-    { { "USED CAPACITY", "USED CAP" }, lf.usedMah and string.format("%d mAh", math.floor(lf.usedMah + 0.5)) or "--" },
+    { { "USED CAPACITY", "USED CAP" }, fmtMah(lf.usedMah) },
     { "PACK CYCLES", (#cycles > 0) and table.concat(cycles, ", ") or "--" },
     { "CHARGE", left and (left .. " %") or "--", left and getBarColor(left, warn, crit),
       (start and (start .. " %") or "--") .. " -> " },
     { { "LAST VOLTAGE", "LAST V" }, lastV },
-    { { "MAX CURRENT", "MAX CURR" }, ctx.maxCurrent and string.format("%.1f A", ctx.maxCurrent) or "--" },
+    { { "MAX CURRENT", "MAX CURR" }, fmtAmps(ctx.maxCurrent) },
   }
   drawHeaderLabel(pad, pad, formatBatteryLabel(lf.profileName, lf.instances))
   local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
@@ -1081,7 +968,7 @@ end
 -- the googly-eyes mascot beside it.
 local function drawBrandHeading(ctx)
   local pad = sx(4)
-  local hh, sq = fontH(SMLSIZE), sx(5)   -- accent square + title as on GPS Homer
+  local hh, sq = fontH(SMLSIZE), sx(5)   -- accent square + title
   lcd.drawFilledRectangle(pad, pad + math.floor((hh - sq) / 2), sq, sq, BRAND)
   local tx = pad + sq + sx(3)
   dtext(tx, pad, "LIPO-NANNY", BRAND, SMLSIZE)

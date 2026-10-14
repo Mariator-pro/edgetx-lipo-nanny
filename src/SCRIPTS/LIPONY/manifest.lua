@@ -3,7 +3,7 @@
 -- =====================================================================
 -- SD card path: /SCRIPTS/LIPONY/manifest.lua
 -- Loaded only by the settings tool. Labels and hints live here; ranges,
--- defaults, sound slots and the config file live in core.lua.
+-- defaults, choices, sound slots and the config file live in core.lua.
 -- =====================================================================
 -- SPDX-License-Identifier: GPL-2.0-only
 -- Copyright (C) 2026 Mariator-pro
@@ -37,6 +37,9 @@ return function(core)
       { key = "hapticStrength", page = "alerts", label = "Strength", shared = true,
         type = "choice", choices = { 1, 2, 3 }, labels = { "Soft", "Normal", "Strong" },
         default = D.hapticStrength },
+      { key = "flightTime", page = "display", label = "Flight time", type = "choice",
+        choices = core.FLIGHT_TIMES, labels = { "EdgeTX Timer 1", "Remaining Timer" }, default = D.flightTime,
+        hint = "Time shown beside the battery % in flight" },
     },
 
     -- Rows on the Alerts page, in core.SOUND_KEYS order
@@ -51,7 +54,7 @@ return function(core)
     end,
 
     resets = {
-      { label = "Reset settings", ask = "Reset warnings and sounds to factory defaults? No data is lost.",
+      { label = "Reset settings", ask = "Reset warnings, sounds and flight time to factory defaults? No data is lost.",
         run = core.resetSettings },
       { label = "Reset stats", ask = "Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Batteries and models stay.",
         run = core.resetStats },

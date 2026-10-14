@@ -74,16 +74,22 @@ candidate is taken automatically.
 - **Remaining %**: the big number, driven by consumed mAh offset by the start
   state of charge and shrunk by the pack's **Wear %**. Coloured green / yellow /
   red against the warn / critical thresholds.
-- **TIME LEFT**: estimated remaining flight time (mm:ss) from the average current
-  draw down to the **critical** threshold (you should be landing by then). The
-  average only counts while armed and follows the last minute or so of flying.
-  Shows `calc..` until 30 s of flying, and `--:--` if there's no current
-  sensor or it only reads 0 A (FC without a current meter). Only on zones tall enough for it (not in the 2×2 quarter tile).
-- **REMAINING**: remaining capacity in mAh, shown as `X` `of Y mAh` (Y = the
-  effective, wear-adjusted capacity).
-- **CONSUMED**: what you've actually drawn this flight (the raw mAh sensor).
-- **Live voltage** (V/cell): coloured green / yellow / red from the chemistry's
-  own voltage range.
+- **TIMER**: right on the line of the percentage, the model's Timer 1 (nothing
+  while it is off). With **Flight time** set to `Remaining Timer` (Flight Bag,
+  Display page) it shows **TIME LEFT** instead, the estimated remaining
+  flight time (mm:ss) from the average current draw down to the **critical**
+  threshold (you should be landing by then). The average only counts while armed
+  and follows the last minute or so of flying. Shows `calc..` until 30 s of
+  flying, and `--:--` if there's no current sensor or it only reads 0 A (FC
+  without a current meter).
+- **Bar**: the remaining percentage as a bar, with yellow and red marks at the
+  warn and critical thresholds.
+- **PACK** / **CELL**: live pack voltage and voltage per cell, coloured green /
+  yellow / red from the chemistry's own voltage range.
+- **LEFT**: remaining capacity in mAh (start offset and wear included).
+- **CURRENT**: live current draw.
+
+Small zones keep the percentage, the bar and as many of these rows as fit.
 
 ---
 

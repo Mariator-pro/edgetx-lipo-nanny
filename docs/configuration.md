@@ -25,6 +25,7 @@ their own settings to them or bring further pages:
 | **Alerts** | Sounds on/off, vibration and its strength (shared by all Flight Bag scripts), and the sound per warning with a **Play** test. |
 | **Batteries** | Your library of battery *profiles* (a model of battery) and their physical *packs*. |
 | **Models** | Per-model setup: cell count, single vs. parallel, which batteries are assigned, sensor mapping. |
+| **Display** | **Flight time**: what the flight view shows beside the battery %. |
 
 Tapping the **Lipo Nanny** icon opens a popup with the version, the project link,
 **Files** (the paths on the SD card) and the resets (see below). A warning sign on
@@ -128,7 +129,7 @@ Only needed if you don't use ELRS/CRSF. Three telemetry sources are mapped, plus
 
 | Sensor | Default name | Used for |
 |---|---|---|
-| **Voltage** | `RxBt` | Resting voltage → start SoC, and the live V/cell readout. |
+| **Voltage** | `RxBt` | Resting voltage → start SoC, and the live PACK / CELL readouts. |
 | **Current** | `Curr` | Live current draw. |
 | **Capacity** | `Capa` | Consumed mAh, the main remaining-% driver. |
 | **Capacity unit** | `mAh used` | Set to `% remaining` only if your FC sends the remaining percent instead of consumed mAh. |
@@ -186,9 +187,15 @@ Flight Bag scripts, so no reset changes them.
 
 | Button | Notes |
 |---|---|
-| **Reset settings** | Restores the thresholds and warning sounds to their defaults. Batteries, models and all statistics are kept. |
+| **Reset settings** | Restores the thresholds, warning sounds and flight time to their defaults. Batteries, models and all statistics are kept. |
 | **Reset stats** | Zeroes every pack's **cycle count and statistics** (Life mAh, Vmin, Last used) and empties the archive. Profiles and models are kept. |
 | **Factory reset** | Erases **all** batteries, models, statistics and settings. |
+
+**Display page**
+
+| Row | Notes |
+|---|---|
+| **Flight time** | `EdgeTX Timer 1` (default) shows **TIMER** with the model's Timer 1 (nothing while Timer 1 is off); `Remaining Timer` shows **TIME LEFT**, the estimated remaining flight time. If Flight Wingman is installed too, its own **Flight time** row sits under the Wingman heading. |
 
 > Changes you save in the tool are picked up by a running widget within a few
 > seconds (it re-reads `config.lua` on its own), so no radio restart is needed.

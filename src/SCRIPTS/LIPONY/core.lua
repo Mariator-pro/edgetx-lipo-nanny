@@ -88,7 +88,9 @@ local LIMITS = {
   wear           = { min = 0, max = 50, step = 1 },
 }
 local DEFAULTS = { warnPct = 30, critPct = 20, audio = true, haptic = false, hapticStrength = 2,
-                   cells = 6, capacityMah = 1300 }
+                   cells = 6, capacityMah = 1300, flightTime = "timer" }
+-- Time on the flight page beside the %: EdgeTX Timer 1 or the remaining flight time.
+Core.FLIGHT_TIMES = { "timer", "timeleft" }
 Core.LIMITS   = LIMITS
 Core.DEFAULTS = DEFAULTS
 
@@ -380,6 +382,7 @@ local function normalizeConfig(cfg)
   if type(out.haptic) ~= "boolean" then out.haptic = DEFAULTS.haptic end
   out.hapticStrength = clampNum(out.hapticStrength, L.hapticStrength.min, L.hapticStrength.max,
                                 DEFAULTS.hapticStrength)
+  if out.flightTime ~= "timeleft" then out.flightTime = DEFAULTS.flightTime end
   local snd, sounds = (type(out.sounds) == "table") and out.sounds or {}, {}
   for k, v in pairs(snd) do sounds[k] = v end
   for _, k in ipairs(Core.SOUND_KEYS) do sounds[k] = soundOr(snd[k]) end
@@ -457,6 +460,7 @@ local function defaultConfig()
     audio         = DEFAULTS.audio,
     haptic        = DEFAULTS.haptic,
     hapticStrength = DEFAULTS.hapticStrength,
+    flightTime    = DEFAULTS.flightTime,
     batteries     = {},
     archive       = {},
     sounds        = {},
@@ -464,7 +468,7 @@ local function defaultConfig()
   }
 end
 
--- Settings back to factory values (thresholds, sounds); batteries, models and
+-- Settings back to factory values (thresholds, sounds, flight time); batteries, models and
 -- statistics stay, and so do the shared settings (audio, haptic), which are set once for
 -- all scripts in the settings tool. Returns true on success; false without a readable
 -- config, so a damaged file is never overwritten.
@@ -472,6 +476,7 @@ local function resetSettings()
   local cfg = loadConfig()
   if not cfg then return false end
   cfg.warnPct, cfg.critPct, cfg.sounds = DEFAULTS.warnPct, DEFAULTS.critPct, {}
+  cfg.flightTime = DEFAULTS.flightTime
   return saveConfig(cfg)
 end
 
@@ -1476,7 +1481,7 @@ local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before com
 Core.CONFIRM_HOLD = CONFIRM_HOLD
 
 -- Stick-gesture control for the selection popup, polled every tick by the widget
--- (works without fullscreen, unlike key events; shared with Flight Wingman). Elevator moves the cursor one step per deflection
+-- (works without fullscreen, unlike key events). Elevator moves the cursor one step per deflection
 -- (re-armed in the dead-zone); aileron held full-right with elevator centred commits.
 local function pollSelectionSticks(ctx)
   if not ctx.pendingSelection then return end
