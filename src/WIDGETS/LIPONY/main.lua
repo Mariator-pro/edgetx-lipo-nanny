@@ -169,11 +169,25 @@ local function dtext(x, y, text, color, flags)
 end
 
 
--- Bar-fill color (only the bar changes color, text stays neutral).
-local function getBarColor(restPct, warnPct, critPct)
-  if restPct > warnPct then return COLORS.accent end   -- green (theme accent)
-  if restPct > critPct then return WARN_COL      end
-  return CRIT_COL
+-- Colour of a core level (0 ok, 1 warning, 2 critical): the big value, its bar
+-- and the status green, yellow or red; small values text colour, yellow or red.
+-- Levels come from the core, the widget never compares thresholds itself.
+local function levelColor(level)
+  if level == nil then return COLORS.fg end   -- no level: neutral
+  if level == 2 then return CRIT_COL end
+  if level == 1 then return WARN_COL end
+  return COLORS.accent
+end
+-- A colour level from the core, guarded: a failing level function leaves only
+-- that value in its neutral colour instead of breaking the whole tile.
+local function lvl(f, ...)
+  local ok, v = pcall(f, ...)
+  if ok then return v end
+end
+local function smallColor(level)
+  if level == 2 then return CRIT_COL end
+  if level == 1 then return WARN_COL end
+  return COLORS.fg
 end
 
 -- Label "name #N" (or "#1+2" for parallel). Instances are { pos = N, id = … }
@@ -225,16 +239,13 @@ local function drawHeaderLabel(x, y, label)
   dtext(x + dot + sx(3), y, label, BRAND, SMLSIZE)
 end
 
--- Horizontal threshold bar: track, coloured fill, yellow/red tick marks at
--- warn/crit, and (if withLabels) the WARN caption above / CRIT caption below the
--- bar so close thresholds never collide. Caller must leave one text line above
--- and below the bar.
-local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
+-- Horizontal threshold bar: track, coloured fill, yellow/red tick marks at warn/crit.
+local function drawThresholdBar(x, y, w, h, pct, warn, crit)
   lcd.drawFilledRectangle(x, y, w, h, COLORS.track)
   local p     = math.max(0, math.min(100, pct or 0))
   local fillW = math.floor(w * p / 100)
   if fillW > 0 then
-    lcd.drawFilledRectangle(x, y, fillW, h, getBarColor(p, warn, crit))
+    lcd.drawFilledRectangle(x, y, fillW, h, levelColor(lvl(core.restLevel, p, warn, crit)))
   end
   local tickW = math.max(sx(2), 2)
   local function tick(thr, col)
@@ -243,17 +254,6 @@ local function drawThresholdBar(x, y, w, h, pct, warn, crit, withLabels)
   end
   tick(warn, WARN_COL)
   tick(crit, CRIT_COL)
-  if withLabels then
-    local lh = fontH(SMLSIZE)
-    local function label(thr, txt, col, ly)
-      local tw = textW(txt, SMLSIZE)
-      local lx = x + math.floor(w * thr / 100) - math.floor(tw / 2)
-      if lx < x then lx = x elseif lx + tw > x + w then lx = x + w - tw end
-      dtext(lx, ly, txt, col, SMLSIZE)
-    end
-    label(warn, string.format("WARN %d %%", warn), WARN_COL, y - lh - sx(1))  -- above
-    label(crit, string.format("CRIT %d %%", crit), CRIT_COL,    y + h + sx(2))   -- below
-  end
 end
 
 -- Pulsing red dot, top-right (fades in and out every 2 s); the caller draws it only
@@ -271,12 +271,10 @@ local function drawHeartbeat(ctx)
   lcd.drawFilledCircle(ctx.zone.w - sx(4) - r, sx(4) + r, r, lcd.RGB(mix(1), mix(2), mix(3)))
 end
 
--- Colour for the voltage readouts: green/yellow/red from the chemistry's per-cell
--- voltage thresholds, neutral when voltage/cells/chemistry are unavailable.
+-- Colour for the voltage readouts (small values): text colour, yellow or red
+-- from the chemistry's per-cell voltage thresholds.
 local function voltageColor(ctx)
-  local lvl = core.voltageLevel(ctx)
-  if lvl == nil then return COLORS.fg end   -- missing value: neutral, not OK
-  return (lvl == 0 and COLORS.accent) or (lvl == 1 and WARN_COL) or CRIT_COL
+  return smallColor(lvl(core.voltageLevel, ctx))
 end
 
 -- Capacity and current, "--" when missing; large values in a shorter form so
@@ -305,8 +303,9 @@ local function connectedMetrics(ctx)
     restPct  = restPct,
     warn     = warn,
     crit     = crit,
-    pctColor = restPct and getBarColor(restPct, warn, crit) or COLORS.fg,   -- missing: neutral
+    pctColor = restPct and levelColor(lvl(core.restLevel, restPct, warn, crit)) or COLORS.fg,   -- missing: neutral
     vColor   = voltageColor(ctx),
+    leftColor = smallColor(lvl(core.restLevel, restPct, warn, crit)),
     label    = formatBatteryLabel(profile, ctx.selectedInstances),
     pctText  = restPct and string.format("%d", math.floor(restPct + 0.5)) or "--",
     packText = ctx.voltage and string.format("%.1f V", ctx.voltage) or "--",
@@ -319,15 +318,16 @@ local function connectedMetrics(ctx)
 end
 
 -- Time beside the %, chosen in the settings tool: Timer 1 (none while it is off)
--- or the remaining flight time. Returns label, value.
+-- or the remaining flight time. Returns label, value and the value's colour.
 local function flightTime(ctx, m)
   if ctx.config and ctx.config.flightTime == "timeleft" then return "TIME LEFT ", m.timeLeft end
   local t = model.getTimer and model.getTimer(0)
   if not (t and t.mode ~= 0) then return nil end
   local sec  = t.value
   local sign = (sec < 0) and "-" or ""
+  local col  = smallColor(lvl(core.timerLevel, sec))   -- red once a countdown runs below zero
   sec = math.abs(sec)
-  return "TIMER ", string.format("%s%02d:%02d", sign, math.floor(sec / 60), sec % 60)
+  return "TIMER ", string.format("%s%02d:%02d", sign, math.floor(sec / 60), sec % 60), col
 end
 
 -- Muted label followed by its value (text colour unless `col` is given).
@@ -343,20 +343,20 @@ end
 
 -- Info grid (2 rows x 2 cols). Column 2 starts at the middle, or right of the
 -- widest column-1 content on a narrow zone.
-local GRID_A, GRID_B = "LEFT 0000 mAh", "CURRENT 00.0 A"
+local GRID_A, GRID_B, GRID_B2 = "LEFT 0000 mAh", "CURRENT 00.0 A", "PER CELL 0.00 V"
 local function gridW()
-  return textW(GRID_A, SMLSIZE) + sx(4) + textW(GRID_B, SMLSIZE)
+  return textW(GRID_A, SMLSIZE) + sx(4) + math.max(textW(GRID_B, SMLSIZE), textW(GRID_B2, SMLSIZE))
 end
 local function gridCol2(x0, W)
   return x0 + math.max(math.floor(W / 2), textW(GRID_A, SMLSIZE) + sx(4))
 end
 local function drawInfoRow1(x0, W, y, m)
   drawKV(x0, y, "PACK ", m.packText, m.vColor)
-  drawKV(gridCol2(x0, W), y, "CELL ", m.cellText, m.vColor)
+  drawKV(gridCol2(x0, W), y, "PER CELL ", m.cellText, m.vColor)
 end
 local function drawInfoGrid(x0, W, r1y, r2y, m)
   drawInfoRow1(x0, W, r1y, m)
-  drawKV(x0, r2y, "LEFT ", m.leftText)
+  drawKV(x0, r2y, "LEFT ", m.leftText, m.leftColor)
   drawKV(gridCol2(x0, W), r2y, "CURRENT ", m.currText)
 end
 
@@ -368,7 +368,7 @@ local function drawPctCaption(x0, W, pctBottom, labelX, m)
   local tX   = x0 + W
   if m.timeLabel then
     tX = tX - (textW(m.timeLabel, SMLSIZE) + textW(m.timeValue, SMLSIZE))
-    drawKV(tX, capY, m.timeLabel, m.timeValue)
+    drawKV(tX, capY, m.timeLabel, m.timeValue, m.timeColor)
   end
   local avail = tX - sx(4) - labelX
   local lbl   = "REMAINING"
@@ -388,22 +388,29 @@ local function drawPctRow(x0, W, top, maxH, m)
 end
 
 local function drawBar(x, y, w, h, m)
-  drawThresholdBar(x, y, w, h, m.restPct, m.warn, m.crit, false)
+  drawThresholdBar(x, y, w, h, m.restPct, m.warn, m.crit)
+end
+
+-- FULL tier geometry for a zone of inner height H: percent block below the
+-- header, the 2 info rows below it (each at least one line tall so they never
+-- crowd up into the bar) and the bar height. Bar takes ~42% of the block, capped
+-- so the band above always fits a MIDSIZE number. The preflight page reuses the
+-- bar height so both pages show the same bar.
+local function fullGeometry(H)
+  local smlH     = fontH(SMLSIZE)
+  local rest     = H - smlH - sx(1)
+  local hInfoRow = math.max(math.floor(rest * 0.20), smlH)
+  local hPct     = rest - 2 * hInfoRow - sx(3)
+  local barH     = math.max(sx(10), math.min(math.floor(hPct * 0.42), hPct - fontH(MIDSIZE) - sx(3)))
+  return hPct, hInfoRow, barH
 end
 
 -- FULL tier: header, percent block (big % + threshold bar) and the 2x2 info grid.
 local function drawConnectedFull(W, H, x0, y0, m)
   drawHeaderLabel(x0, y0, m.label)
-  -- Below the header: percent block, a gap, then 2 info rows, each at least one
-  -- line tall so the rows never crowd up into the bar on a short zone.
-  local smlH     = fontH(SMLSIZE)
-  local top      = y0 + smlH + sx(1)
-  local rest     = (y0 + H) - top
+  local top      = y0 + fontH(SMLSIZE) + sx(1)
   local infoGap  = sx(3)
-  local hInfoRow = math.max(math.floor(rest * 0.20), smlH)
-  local hPct     = rest - 2 * hInfoRow - infoGap
-  -- Bar takes ~42% of the block, capped so the band above always fits a MIDSIZE number.
-  local barH  = math.max(sx(10), math.min(math.floor(hPct * 0.42), hPct - fontH(MIDSIZE) - sx(3)))
+  local hPct, hInfoRow, barH = fullGeometry(H)
   local barY  = top + hPct - barH
   local bandH = barY - sx(1) - top
   -- Big percent anchored to the top, sized from "100" so "1" isn't bigger.
@@ -484,7 +491,7 @@ local function drawConnectedTile(ctx)
   local x0, y0 = pad, pad
   local W, H   = ctx.zone.w - 2 * pad, ctx.zone.h - 2 * pad
   local m      = connectedMetrics(ctx)
-  m.timeLabel, m.timeValue = flightTime(ctx, m)
+  m.timeLabel, m.timeValue, m.timeColor = flightTime(ctx, m)
   if connectedFitsFull(W, H) then
     drawConnectedFull(W, H, x0, y0, m)
   elseif connectedFitsMedium(W, H) then
@@ -608,43 +615,37 @@ end
 -- on the live tile.
 -- ---------------------------------------------------------------------------
 
--- Colour of a check level: 0 accent, 1 yellow, 2 red.
-local function levelColor(level)
-  if level == 2 then return CRIT_COL end
-  if level == 1 then return WARN_COL end
-  return COLORS.accent
-end
-
 -- Seconds left on a page timer that started at `since` (the core's ms clock,
 -- getTime() * 10) and runs `total` ms.
 local function secsLeft(since, total)
   return math.max(0, math.ceil((total - (getTime() * 10 - since)) / 1000))
 end
 
--- Countdown at the bottom right: text left of a bar that runs empty. The text
--- shrinks to the seconds when the row is too narrow.
-local function drawCountdown(x0, W, y, secs, total, label)
+-- Countdown at the bottom right: the seconds left of a bar that runs empty.
+local function drawCountdown(x0, W, y, secs, total)
   local smlH = fontH(SMLSIZE)
   local barH = math.max(3, sx(6))
-  local barW = math.max(sx(30), math.floor(W * 0.35))
+  local barW = math.max(sx(30), math.floor(W * 0.26))
   local bx   = x0 + W - barW
   local by   = y + math.floor((smlH - barH) / 2)
   lcd.drawFilledRectangle(bx, by, barW, barH, COLORS.track)
   local fw = math.floor(barW * math.max(0, math.min(1, secs / total)))
   if fw > 0 then lcd.drawFilledRectangle(bx, by, fw, barH, COLORS.muted) end
-  local txt = string.format("%s in %d s", label, secs)
-  if textW(txt, SMLSIZE) > bx - sx(6) - x0 then txt = string.format("%d s", secs) end
+  local txt = string.format("%d s", secs)
   dtext(bx - sx(6) - textW(txt, SMLSIZE), y, txt, COLORS.muted, SMLSIZE)
 end
 
 -- Status line: dot plus text in the level colour (PACK READY / BATTERY LOW).
+local function statusLineW(st)
+  return 2 * math.max(2, sx(4)) + sx(4) + textW(st.text, SMLSIZE)
+end
 local function drawStatusLine(x, y, st)
   local smlH = fontH(SMLSIZE)
   local r    = math.max(2, sx(4))
   local col  = levelColor(st.level)
   lcd.drawFilledCircle(x + r, y + math.floor(smlH / 2), r, col)
   dtext(x + 2 * r + sx(4), y, st.text, col, SMLSIZE)
-  return 2 * r + sx(4) + textW(st.text, SMLSIZE)
+  return statusLineW(st)
 end
 
 -- Rows evenly spread below the header (header = row 0, n rows, the last at the
@@ -657,93 +658,107 @@ local function rowSpread(h, pad, n)
   return function(i) return pad + math.floor(i * span / n + 0.5) end
 end
 
--- Preflight page: per-cell voltage (big, check colour) with the pack total,
--- the threshold bar, the battery status and the countdown to the flight page
--- while the check is met. Status and countdown rows are fixed, the countdown
--- row stays empty while it does not run, so nothing moves. Zones below FULL
--- keep header, a voltage row, status and countdown as far as they fit.
+-- Preflight page in the live tile's rows: per-cell voltage (check colour) with
+-- PER CELL and PACK where the live tile has the %, the threshold bar, then
+-- REMAINING / LEFT and the battery status with the countdown to the flight page
+-- (seconds only) where the live tile has its info grid. Small zones drop
+-- REMAINING / LEFT first, then the bar.
 local function drawPreTile(ctx)
-  local w, h   = ctx.zone.w, ctx.zone.h
   local pad    = sx(4)
+  local x0, y0 = pad, pad
+  local W, H   = ctx.zone.w - 2 * pad, ctx.zone.h - 2 * pad
   local smlH   = fontH(SMLSIZE)
   local m      = connectedMetrics(ctx)
   local st     = core.preflight(m.restPct, m.warn, m.crit)
-  local col    = levelColor(st.level)
+  local vLevel = lvl(core.voltageLevel, ctx)   -- PER CELL and PACK as on the live tile
+  local col    = vLevel and levelColor(vLevel) or COLORS.fg
   local hasV   = ctx.voltage and ctx.cells and ctx.cells > 0
   local cell   = hasV and string.format("%.2f", ctx.voltage / ctx.cells) or "-.--"
   local total  = ctx.voltage and string.format("%.1f V", ctx.voltage) or "--.- V"
   local secs   = ctx.readySince and secsLeft(ctx.readySince, core.PRE_HOLD_T)
-  drawHeaderLabel(pad, pad, m.label)
-  local bottomY = h - pad - smlH
-  local function countdown(y)
-    if secs then drawCountdown(pad, w - 2 * pad, y, secs, core.PRE_HOLD_T / 1000, "Flight page") end
+  local function statusRow(y)
+    drawStatusLine(x0, y, st)
+    if secs then drawCountdown(x0, W, y, secs, core.PRE_HOLD_T / 1000) end
+  end
+  local function infoRow(y)   -- LEFT right-aligned like TX on Link Sentinel
+    local lx  = x0 + W - textW("LEFT " .. m.leftText, SMLSIZE)
+    local pct = m.pctText .. " %"
+    local lbl = textW("REMAINING " .. pct, SMLSIZE) <= lx - sx(6) - x0 and "REMAINING " or "REMAIN "
+    drawKV(x0, y, lbl, pct, m.leftColor)
+    drawKV(lx, y, "LEFT ", m.leftText, m.leftColor)
+  end
+  -- PER CELL after the value, PACK and the pack voltage right, on the value's baseline
+  local function captions(valRight, bottom)   -- pack voltage in caption size, like MODE on Link Sentinel
+    local totX = x0 + W - textW(total, SMLSIZE)
+    dtext(totX, bottom - smlH, total, smallColor(vLevel), SMLSIZE)
+    local capX = totX - textW("PACK ", SMLSIZE)
+    dtext(capX, bottom - smlH, "PACK ", COLORS.muted, SMLSIZE)
+    local pcX = valRight + sx(6)
+    if pcX + textW("PER CELL", SMLSIZE) <= capX - sx(4) then
+      dtext(pcX, bottom - smlH, "PER CELL", COLORS.muted, SMLSIZE)
+    end
+  end
+  -- value row for MEDIUM/SMALL ("0.00 V" one size); returns the y below it.
+  -- withStatus: the status right-aligned instead of the pack voltage (no row of its own).
+  local function valueRow(top, maxH, withStatus)
+    local txt = cell .. " V"
+    local f   = pickFont("0.00 V", W * 0.5, maxH, MIDSIZE)
+    dtext(x0, top, txt, col, f)
+    local bottom = top + fontH(f)
+    if withStatus then
+      local sx0 = x0 + W - statusLineW(st)
+      drawStatusLine(sx0, bottom - smlH, st)
+      local pcX = x0 + textW(txt, f) + sx(6)
+      if pcX + textW("PER CELL", SMLSIZE) <= sx0 - sx(6) then
+        dtext(pcX, bottom - smlH, "PER CELL", COLORS.muted, SMLSIZE)
+      end
+    else
+      captions(x0 + textW(txt, f), bottom)
+    end
+    return bottom
   end
 
-  if not connectedFitsFull(w - 2 * pad, h - 2 * pad) then
-    local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
-    -- rows: voltage, bar, status, countdown; with three rows the countdown joins
-    -- the status line, with two the bar goes too
-    local k    = math.max(1, math.min(4, n))
-    local rowY = rowSpread(h, pad, k)
-    local bar  = k >= 3 and 1 or 0
-    -- value row: value + unit coloured (up to MIDSIZE),
-    -- PER CELL muted beside it, TOTAL muted before the pack voltage on the right
-    local top    = rowY(1)
-    local valTxt = cell .. " V"
-    local numF   = SMLSIZE
-    local maxH   = k >= 2 and (rowY(2) - sx(2) - top) or (h - pad - top)
-    for _, f in ipairs({ MIDSIZE, 0 }) do
-      if textW(valTxt, f) <= (w - 2 * pad) * 0.5 and fontH(f) <= maxH then numF = f; break end
+  if connectedFitsFull(W, H) then   -- as drawConnectedFull
+    drawHeaderLabel(x0, y0, m.label)
+    local top   = y0 + smlH + sx(1)
+    local hPct, hInfoRow, barH = fullGeometry(H)
+    local barY  = top + hPct - barH
+    local f     = pickFont("0.00", W * 0.5, barY - sx(1) - top, MIDSIZE)
+    local vw    = drawValueUnit(x0, top, cell, "V", col, f, smallerFont(f))
+    captions(x0 + vw, top + fontH(f))
+    drawBar(x0, barY, W, barH, m)
+    local gy = top + hPct + sx(3)
+    infoRow(vcenter(gy, hInfoRow))
+    statusRow(vcenter(gy + hInfoRow, hInfoRow))
+  elseif connectedFitsMedium(W, H) then   -- as drawConnectedMedium
+    drawHeaderLabel(x0, y0, m.label)
+    local span    = H - smlH
+    local minSpan = 4 * (smlH - sx(5))
+    if span < minSpan then span = minSpan end
+    local function rowY(i) return y0 + math.floor(i * span / 4 + 0.5) end
+    local top, row1Y = rowY(1), rowY(3)
+    infoRow(row1Y)
+    statusRow(rowY(4))
+    local barTop = valueRow(top, math.floor((row1Y - sx(2) - top) * 0.5))
+    drawBar(x0, barTop, W, math.max(sx(8), (row1Y - sx(1)) - barTop), m)
+  else   -- as drawConnectedSmall: header, value, bar and status as far as they fit
+    local gap   = sx(1)
+    local nRows = math.floor((H + gap) / (smlH + gap))
+    if nRows <= 1 then
+      local txt = cell .. " V"
+      local f   = pickFont(txt, W, H)
+      dtext(x0, y0 + math.floor((H - fontH(f)) / 2), txt, col, f)
+      return
     end
-    dtext(pad, top, valTxt, col, numF)
-    local capY = top + fontH(numF) - smlH
-    local totX = w - pad - textW("TOTAL ", SMLSIZE) - textW(total, SMLSIZE)
-    dtext(totX, capY, "TOTAL ", COLORS.muted, SMLSIZE)
-    dtext(totX + textW("TOTAL ", SMLSIZE), capY, total, COLORS.fg, SMLSIZE)
-    local capX = pad + textW(valTxt, numF) + sx(6)
-    if capX + textW("PER CELL", SMLSIZE) <= totX - sx(4) then
-      dtext(capX, capY, "PER CELL", COLORS.muted, SMLSIZE)
-    end
-    if bar == 1 then
-      local barH = sx(8)
-      drawThresholdBar(pad, rowY(2) + math.floor((smlH - barH) / 2), w - 2 * pad, barH, m.restPct, m.warn, m.crit, false)
-    end
-    if k >= 4 then
-      drawStatusLine(pad, rowY(3), st)
-      countdown(rowY(4))
-    elseif k >= 2 then   -- no row of its own: the countdown joins the status line
-      local cx = pad + drawStatusLine(pad, rowY(k), st) + sx(8)
-      if secs then drawCountdown(cx, w - pad - cx, rowY(k), secs, core.PRE_HOLD_T / 1000, "Flight page") end
-    end
-    return
+    drawHeaderLabel(x0, y0, m.label)
+    if nRows == 2 then valueRow(y0 + smlH + gap, (y0 + H) - (y0 + smlH + gap), true); return end
+    local divisor = nRows >= 4 and 3 or 2
+    local function rowY(i) return y0 + math.floor(i * (H - smlH) / divisor + 0.5) end
+    local stY    = rowY(divisor)
+    statusRow(stY)
+    local barTop = valueRow(rowY(1), math.floor((stY - sx(2) - rowY(1)) * 0.5))
+    if divisor == 3 then drawBar(x0, barTop, W, math.max(sx(8), (stY - sx(1)) - barTop), m) end
   end
-
-  -- FULL: big per-cell value with the caption beside it, TOTAL and the pack voltage right, then the threshold bar
-  -- (WARN/CRIT captions when there is room), the status and the bottom row;
-  -- the spare height is shared out evenly between the blocks.
-  local top     = pad + smlH + sx(1)
-  local bigFlag = pickFont("0.00V", math.floor((w - 2 * pad) * 0.5), math.floor((bottomY - top) * 0.4))
-  local bigH    = fontH(bigFlag)
-  local barH    = sx(8)
-  local fixed   = bigH + barH + smlH
-  local labels  = (bottomY - top - fixed) >= 2 * smlH + sx(3) + 3 * sx(4)
-  -- at least one text row high, so the status line sits where the sibling widgets put it
-  local barBlk  = math.max(smlH, barH + (labels and (2 * smlH + sx(3)) or 0))
-  local gap     = math.max(0, math.floor((bottomY - top - (fixed - barH + barBlk)) / 3))
-  local vw      = drawValueUnit(pad, top, cell, "V", col, bigFlag, smallerFont(bigFlag))
-  local tw      = textW(total, 0)
-  local rightW  = textW("TOTAL", SMLSIZE) + sx(4) + tw
-  local capX    = pad + vw + sx(6)
-  if capX + textW("PER CELL", SMLSIZE) <= w - pad - rightW - sx(4) then
-    dtext(capX, top + bigH - smlH, "PER CELL", COLORS.muted, SMLSIZE)
-  end
-  dtext(w - pad - tw, top + bigH - fontH(0), total, COLORS.fg, 0)
-  dtext(w - pad - rightW, top + bigH - smlH, "TOTAL", COLORS.muted, SMLSIZE)
-  local blkY    = top + bigH + gap
-  local barY    = blkY + (labels and (smlH + sx(1)) or math.floor((barBlk - barH) / 2))
-  drawThresholdBar(pad, barY, w - 2 * pad, barH, m.restPct, m.warn, m.crit, labels)
-  drawStatusLine(pad, blkY + barBlk + gap, st)
-  countdown(bottomY)
 end
 
 -- Muted label left, value right-aligned at the row's end; `pre` (optional) is
@@ -775,24 +790,29 @@ local function drawEndedTile(ctx)
   local left  = (cap and cap > 0 and off and lf.usedMah)
                 and math.max(0, math.floor((cap - lf.usedMah - off) / cap * 100 + 0.5)) or nil
   local vpc   = lf.lastVoltagePerCell
-  local lastV = (vpc and ctx.cells) and string.format("%.1f V  %.2f V/c", vpc * ctx.cells, vpc) or "--"
+  local lastV = vpc and string.format("%.2f V", vpc) or "--"
   local cycles = {}
   for _, inst in ipairs(lf.instances or {}) do cycles[#cycles + 1] = tostring(core.cyclesFor(ctx, inst.id)) end
+  local restCol = smallColor(lvl(core.restLevel, left, warn, crit))
   local rows = {
-    { { "USED CAPACITY", "USED CAP" }, fmtMah(lf.usedMah) },
+    { { "USED CAPACITY", "USED CAP" }, fmtMah(lf.usedMah), restCol },
     { "PACK CYCLES", (#cycles > 0) and table.concat(cycles, ", ") or "--" },
-    { "CHARGE", left and (left .. " %") or "--", left and getBarColor(left, warn, crit),
+    { "CHARGE", left and (left .. " %") or "--", restCol,
       (start and (start .. " %") or "--") .. " -> " },
-    { { "LAST VOLTAGE", "LAST V" }, lastV },
+    { { "LAST PER CELL", "LAST CELL" }, lastV, smallColor(lvl(core.lastVoltageLevel, ctx.selectedProfile and ctx.selectedProfile.chemistry, vpc)) },
     { { "MAX CURRENT", "MAX CURR" }, fmtAmps(ctx.maxCurrent) },
   }
   drawHeaderLabel(pad, pad, formatBatteryLabel(lf.profileName, lf.instances))
   local n    = math.floor((h - 2 * pad - smlH) / (smlH - sx(4)))
-  local k    = math.max(0, math.min(#rows, n - 1))
+  if n < 2 then   -- header and the used capacity, no countdown
+    drawLR(pad, w - 2 * pad, h - pad - smlH, rows[1][1], rows[1][2], rows[1][3])
+    return
+  end
+  local k    = math.min(#rows, n - 1)
   local rowY = rowSpread(h, pad, k + 1)
   for i = 1, k do drawLR(pad, w - 2 * pad, rowY(i), rows[i][1], rows[i][2], rows[i][3], rows[i][4]) end
   drawCountdown(pad, w - 2 * pad, rowY(k + 1), secsLeft(ctx.endedAt or 0, core.ENDED_HOLD_T),
-                core.ENDED_HOLD_T / 1000, "Wait page")
+                core.ENDED_HOLD_T / 1000)
 end
 
 -- ---------------------------------------------------------------------------

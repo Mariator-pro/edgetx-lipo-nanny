@@ -21,16 +21,18 @@ The widget moves through four pages:
 2. **Preflight**: a battery is detected. The pack is **auto-selected when exactly
    one** matches the resting voltage; if several (or none) clearly match, you're
    asked to pick first. Parallel models always prompt for both slots. The page
-   shows the per-cell voltage (`PER CELL`), the pack voltage (`TOTAL`), the
-   threshold bar and the pack check: `PACK READY` (green) or `BATTERY LOW`
+   uses the flight page's rows: the per-cell voltage (`PER CELL`), the pack
+   voltage (`PACK`), the threshold bar, `REMAINING` % and `LEFT` mAh, and the
+   pack check (`PER CELL` and `PACK` coloured by the cell voltage as in flight,
+   the check by the remaining %): `PACK READY` (green) or `BATTERY LOW`
    (yellow below the warn threshold, red below critical). It moves on to the
    flight page as soon as the model is armed (read from the CRSF flight mode
-   `FM`), or after `PACK READY` held for 15 s (`Flight page in N s`).
+   `FM`), or after `PACK READY` held for 15 s (countdown `N s` beside the status).
 3. **Flight**: the live readout (see below).
 4. **Ended**: battery unplugged after a flight. After a short grace period
    (1.5 s without link) the flight is closed out (cycle counting happens here)
    and an **end page** is shown: the pack label, `USED CAPACITY` (mAh), `PACK CYCLES`, `CHARGE` (charge in % at the start and at the end, `100 % -> 23 %`),
-   `LAST VOLTAGE` (pack and per cell) and `MAX CURRENT` (shortened to `USED CAP`, `LAST V` and `MAX CURR` on narrow zones), with a bar counting down 30 s at the
+   `LAST PER CELL` (cell voltage at the end) and `MAX CURRENT` (shortened to `USED CAP`, `LAST CELL` and `MAX CURR` on narrow zones), with a bar counting down 30 s at the
    bottom right. It returns to **Waiting** after
    ~30 s, or immediately if you plug in again.
    If the link drops while the model is **armed**, it is a link failure: the summary is shown and saved as well, and if the
@@ -70,6 +72,9 @@ candidate is taken automatically.
   <img src="img/widget-tile-annotated.png" width="480" alt="Widget tile in flight, values annotated">
 </p>
 
+Colours: the big percentage and its bar are green, yellow or red; the smaller
+values stay in the text colour and only turn yellow or red past a threshold.
+
 - **Pack label**: `name #N` for a single pack, or `#1+2` for a parallel pair.
 - **Remaining %**: the big number, driven by consumed mAh offset by the start
   state of charge and shrunk by the pack's **Wear %**. Coloured green / yellow /
@@ -81,12 +86,13 @@ candidate is taken automatically.
   threshold (you should be landing by then). The average only counts while armed
   and follows the last minute or so of flying. Shows `calc..` until 30 s of
   flying, and `--:--` if there's no current sensor or it only reads 0 A (FC
-  without a current meter).
+  without a current meter). Timer 1 turns red once a countdown runs below zero.
 - **Bar**: the remaining percentage as a bar, with yellow and red marks at the
   warn and critical thresholds.
-- **PACK** / **CELL**: live pack voltage and voltage per cell, coloured green /
-  yellow / red from the chemistry's own voltage range.
-- **LEFT**: remaining capacity in mAh (start offset and wear included).
+- **PACK** / **CELL**: live pack voltage and voltage per cell, turning yellow /
+  red against the chemistry's own voltage range.
+- **LEFT**: remaining capacity in mAh (start offset and wear included), yellow /
+  red like the percentage.
 - **CURRENT**: live current draw.
 
 Small zones keep the percentage, the bar and as many of these rows as fit.

@@ -65,7 +65,7 @@ Besides the flight view above, the widget shows a page for each other phase of a
 <table>
   <tr>
     <td align="center"><img src="docs/img/widget-waiting.png" width="260" alt="Waiting page: no battery connected"></td>
-    <td align="center"><img src="docs/img/widget-preflight.png" width="260" alt="Preflight page with per-cell voltage, total voltage and pack status"></td>
+    <td align="center"><img src="docs/img/widget-preflight.png" width="260" alt="Preflight page with per-cell voltage, total voltage, remaining charge and pack status"></td>
     <td align="center"><img src="docs/img/widget-end.png" width="260" alt="End page with used capacity, pack cycles, charge, last voltage and maximum current"></td>
   </tr>
   <tr>

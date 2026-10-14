@@ -1050,17 +1050,22 @@ local function getThresholds(ctx)
   return warn, crit
 end
 
--- Effective total capacity in mAh: sum over the selected packs of
--- profile.capacityMah × (1 − wear/100). Wear shrinks the usable capacity so the
+-- Level of the remaining capacity: 0 OK, 1 at/below warn, 2 at/below crit; nil without a value.
+local function restLevel(pct, warn, crit)
+  if not pct then return nil end
+  return (pct <= crit and 2) or (pct <= warn and 1) or 0
+end
+
 -- Preflight check of the battery from the remaining % and the thresholds:
 -- PACK READY (level 0), BATTERY LOW at the warning level (1) or the critical one
 -- (2). pct nil (not known yet in the first seconds) counts as full.
 local function preflight(pct, warn, crit)
-  pct = pct or 100
-  local level = (pct <= crit and 2) or (pct <= warn and 1) or 0
+  local level = restLevel(pct or 100, warn, crit)
   return { text = (level > 0) and "BATTERY LOW" or "PACK READY", level = level }
 end
 
+-- Effective total capacity in mAh: sum over the selected packs of
+-- profile.capacityMah × (1 − wear/100). Wear shrinks the usable capacity so the
 -- percentage and warnings track the aged battery; parallel naturally sums two
 -- packs (each with its own wear).
 local function effectiveCapacityMah(ctx)
@@ -1074,18 +1079,38 @@ local function effectiveCapacityMah(ctx)
   return total
 end
 
--- Level of the pack voltage from its per-cell voltage and the chemistry's
--- thresholds: 0 OK, 1 warning, 2 critical; nil without a voltage, 0 when the
--- chemistry or the cell count is unknown.
-local function voltageLevel(ctx)
-  if not ctx.voltage then return nil end
-  local profile = ctx.selectedProfile
-  local chem    = profile and CHEMISTRIES[profile.chemistry]
-  if not chem or not chem.voltageWarn or not ctx.cells or ctx.cells <= 0 then return 0 end
-  local vpc = ctx.voltage / ctx.cells
+-- Level of a per-cell voltage against a chemistry (its name, e.g. "LiPo"): 0 OK,
+-- 1 warning, 2 critical; nil without a value, 0 when the chemistry is unknown.
+local function cellLevel(chemName, vpc)
+  if not vpc then return nil end
+  local chem = chemName and CHEMISTRIES[chemName]
+  if not chem or not chem.voltageWarn then return 0 end
   if vpc >= chem.voltageWarn then return 0 end
   if vpc >= chem.voltageCrit then return 1 end
   return 2
+end
+
+-- Level of the last per-cell voltage after a flight: only critical (2) below
+-- voltageCrit counts, a resting pack sits above the loaded warn line; else 0.
+local function lastVoltageLevel(chemName, vpc)
+  local lvl = cellLevel(chemName, vpc)
+  if lvl == nil then return nil end
+  return (lvl == 2) and 2 or 0
+end
+
+-- Level of the flight timer (seconds, Timer 1 value): a countdown run below
+-- zero is critical (2), else 0; nil without a timer.
+local function timerLevel(secs)
+  if not secs then return nil end
+  return (secs < 0) and 2 or 0
+end
+
+-- Level of the pack voltage (per cell, as cellLevel); nil without a voltage,
+-- 0 when the cell count is unknown.
+local function voltageLevel(ctx)
+  if not ctx.voltage then return nil end
+  if not ctx.cells or ctx.cells <= 0 then return 0 end
+  return cellLevel(ctx.selectedProfile and ctx.selectedProfile.chemistry, ctx.voltage / ctx.cells)
 end
 
 -- Remaining capacity in percent (0..100), or nil if uncalculable.
@@ -1633,6 +1658,10 @@ Core.preflight            = preflight
 Core.effectiveCapacityMah = effectiveCapacityMah
 Core.calculateRestPct     = calculateRestPct
 Core.voltageLevel         = voltageLevel
+Core.cellLevel            = cellLevel
+Core.restLevel            = restLevel
+Core.lastVoltageLevel     = lastVoltageLevel
+Core.timerLevel           = timerLevel
 Core.formatTimeLeft       = formatTimeLeft
 Core.refreshTimeLeft      = refreshTimeLeft
 Core.cyclesFor            = cyclesFor
