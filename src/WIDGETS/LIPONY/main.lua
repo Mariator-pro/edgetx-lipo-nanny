@@ -1125,7 +1125,7 @@ local function drawTile(ctx)
   -- clears pendingSelection, so the next frame falls through to the live tile.
   if ctx.pendingSelection then
     drawSelectionPopup(ctx)
-    if core.isOnline(ctx) then drawHeartbeat(ctx) end   -- link is live during selection
+    if ctx.linkUp then drawHeartbeat(ctx) end   -- heartbeat only while packets arrive (core)
     return
   end
 
@@ -1142,7 +1142,7 @@ local function drawTile(ctx)
     else
       drawWaitingTile(ctx)
     end
-    if core.isOnline(ctx) then drawHeartbeat(ctx) end
+    if ctx.linkUp then drawHeartbeat(ctx) end   -- heartbeat only while packets arrive (core)
   elseif ctx.phase == "ENDED" then
     drawEndedTile(ctx)
   end

@@ -656,24 +656,26 @@ end
 
 
 -- Reads the three sensors and the link state, applies plausibility filters and
--- keeps the last valid value on ctx (invalid samples dropped). Voltage validation
--- needs ctx.cells.
+-- keeps the last valid value on ctx (invalid samples and samples without link
+-- dropped). Voltage validation needs ctx.cells.
 local function readTelemetry(ctx)
   local v = safeGetValue(ctx.sensorVoltage)
   local i = safeGetValue(ctx.sensorCurrent)
   local q = safeGetValue(ctx.sensorCapacity)
   local link = linkUp()
   ctx.linkUp = link
-  if link then
-    -- Armed state from the CRSF flight mode text (true only when known armed),
-    -- for the flight phase.
-    local okFm, fm = pcall(getValue, "FM")
-    ctx.armed = armedFromFM(ctx, okFm and fm or nil)
-  end
 
   -- FC on USB (no battery): link live but voltage, current and capacity all zero.
   -- All three never glitch to zero at once, so no debounce is needed.
   ctx.noBatterySignal = link and v == 0 and i == 0 and q == 0
+
+  -- Without the link EdgeTX reports some sensors as 0 (current): a short dropout
+  -- keeps every value at its last state instead.
+  if not link then return end
+  -- Armed state from the CRSF flight mode text (true only when known armed),
+  -- for the flight phase.
+  local okFm, fm = pcall(getValue, "FM")
+  ctx.armed = armedFromFM(ctx, okFm and fm or nil)
 
   -- Voltage: [0.5 V × cells … 5 V × cells]
   local cells = ctx.cells
