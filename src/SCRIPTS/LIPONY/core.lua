@@ -819,6 +819,7 @@ local function resetFlightState(ctx)
   ctx.stickArmed          = true
   ctx.confirmArmed        = false
   ctx.confirmSince        = nil
+  ctx.confirmFullAt       = nil
   ctx.cellMismatch        = false
   ctx.bookedMah           = nil   -- per-pack mAh already saved this flight (link failure)
   ctx.bookedCycle         = nil   -- packs already given their cycle this flight
@@ -1501,10 +1502,11 @@ local function tick(ctx)
 end
 
 -- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
-local STICK_STEP        = 500  -- deflection that counts as one cursor step
+local STICK_STEP        = 922  -- deflection (90 %) that counts as one cursor step
 local STICK_DEADZONE    = 200  -- re-arms the next step once back inside this
-local CONFIRM_THRESHOLD = 700  -- aileron deflection (full right) that means "confirm"
+local CONFIRM_THRESHOLD = 922  -- aileron deflection (90 %, right) that means "confirm"
 local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit
+local CONFIRM_SHOW      = 10   -- the full bar stays this long (and one tick at least) before the commit
 Core.CONFIRM_HOLD = CONFIRM_HOLD
 
 -- Stick-gesture control for the selection popup, polled every tick by the widget
@@ -1541,20 +1543,26 @@ local function pollSelectionSticks(ctx)
   ctx.popupCursor = cursor
 
   -- Confirm (aileron held full-right, elevator centred). Re-armed only after the
-  -- aileron returns to centre.
+  -- aileron returns to centre. The full hold is kept CONFIRM_SHOW from a later
+  -- tick on, so the bar is always seen full before the selection closes.
   local ail = getValue("ail")
   if math.abs(ail) < STICK_DEADZONE then
     ctx.confirmArmed = true
   end
   if ctx.confirmArmed and ail > CONFIRM_THRESHOLD and math.abs(ele) < STICK_DEADZONE then
+    local now = getTime()
     if ctx.confirmSince == nil then
-      ctx.confirmSince = getTime()
-    elseif (getTime() - ctx.confirmSince) >= CONFIRM_HOLD then
-      ctx.confirmSince = nil
-      commitSlot(ctx, list[cursor])
+      ctx.confirmSince = now
+    elseif now - ctx.confirmSince >= CONFIRM_HOLD then
+      if ctx.confirmFullAt and now - ctx.confirmFullAt >= CONFIRM_SHOW then
+        ctx.confirmSince, ctx.confirmFullAt = nil, nil
+        commitSlot(ctx, list[cursor])
+      else
+        ctx.confirmFullAt = ctx.confirmFullAt or now
+      end
     end
   else
-    ctx.confirmSince = nil          -- released or elevator moved → reset hold timer
+    ctx.confirmSince, ctx.confirmFullAt = nil, nil   -- released or elevator moved → reset hold timer
   end
 end
 
@@ -1614,6 +1622,7 @@ local function newContext()
     stickArmed = true,
     confirmArmed = false,
     confirmSince = nil,
+    confirmFullAt = nil,
     cells = nil,
     restVoltage = nil,
     startSoc = nil,
