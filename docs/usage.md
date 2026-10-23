@@ -54,8 +54,8 @@ needed:
   <img src="img/select-pack.png" width="300" alt="SELECT PACK popup inside the widget tile">
 </p>
 
-- **Elevator up / down** moves the cursor through the list (each row shows the
-  pack label and its cycle count, e.g. `6S 1300 #1 (12c)`).
+- **Elevator full up / down** moves the cursor one row per push through the list
+  (each row shows the pack label and its cycle count, e.g. `6S 1300 #1 (12c)`).
 - **Aileron full right, held ~1 s** (with elevator centred) confirms. A green
   fill bar grows across the row while you hold; the pick commits when it's full.
 
