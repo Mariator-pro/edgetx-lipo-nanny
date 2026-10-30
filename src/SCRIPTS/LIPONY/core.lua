@@ -468,15 +468,14 @@ local function defaultConfig()
   }
 end
 
--- Settings back to factory values (thresholds, sounds, flight time); batteries, models and
--- statistics stay, and so do the shared settings (audio, haptic), which are set once for
+-- Settings back to factory values (thresholds, sounds); batteries, models and statistics
+-- stay, and so do the shared settings (audio, haptic, flight time), which are set once for
 -- all scripts in the settings tool. Returns true on success; false without a readable
 -- config, so a damaged file is never overwritten.
 local function resetSettings()
   local cfg = loadConfig()
   if not cfg then return false end
   cfg.warnPct, cfg.critPct, cfg.sounds = DEFAULTS.warnPct, DEFAULTS.critPct, {}
-  cfg.flightTime = DEFAULTS.flightTime
   return saveConfig(cfg)
 end
 
@@ -501,6 +500,7 @@ local function factoryReset()
   local cfg, fresh = loadConfig(), defaultConfig()
   if cfg then
     fresh.audio, fresh.haptic, fresh.hapticStrength = cfg.audio, cfg.haptic, cfg.hapticStrength
+    fresh.flightTime = cfg.flightTime
     fresh.generation = cfg.generation
   end
   return saveConfig(fresh)

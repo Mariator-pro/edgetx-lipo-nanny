@@ -37,7 +37,7 @@ return function(core)
       { key = "hapticStrength", page = "alerts", label = "Strength", shared = true,
         type = "choice", choices = { 1, 2, 3 }, labels = { "Soft", "Normal", "Strong" },
         default = D.hapticStrength },
-      { key = "flightTime", page = "display", label = "Flight time", type = "choice",
+      { key = "flightTime", page = "display", label = "Flight time", shared = true, type = "choice",
         choices = core.FLIGHT_TIMES, labels = { "EdgeTX Timer 1", "Remaining Timer" }, default = D.flightTime,
         hint = "Time shown beside the battery % in flight" },
     },
@@ -54,7 +54,7 @@ return function(core)
     end,
 
     resets = {
-      { label = "Reset settings", ask = "Reset warnings, sounds and flight time to factory defaults? No data is lost.",
+      { label = "Reset settings", ask = "Reset warnings and sounds to factory defaults? No data is lost.",
         run = core.resetSettings },
       { label = "Reset stats", ask = "Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Batteries and models stay.",
         run = core.resetStats },
