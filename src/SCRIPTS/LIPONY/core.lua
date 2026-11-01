@@ -1503,6 +1503,27 @@ local function writeLogSensors(ctx)
   setTelemetryValue(LOG_SENSOR_ID, 1, 0, packNumber(ctx), 0, 0, "LNpk")
 end
 
+-- One writer per log sensor: every widget that drives this core has its own
+-- state, and the log keeps only the last value written. The first caller owns
+-- the sensors; the claim sits in a global, which all widgets share. A caller
+-- silent for LOG_OWNER_T hands them to the next one.
+local LOG_OWNER_T = 100           -- 1 s in getTime() hundredths
+local WEAK = { __mode = "v" }     -- a removed widget's state can still be collected
+local function ownsLogSensors(key, owner)
+  local now = getTime()
+  local owners = LOG_SENSOR_OWNERS or {}
+  LOG_SENSOR_OWNERS = owners
+  local c = owners[key]
+  if not c then
+    c = setmetatable({}, WEAK)
+    owners[key] = c
+  elseif c.owner and c.owner ~= owner and now >= c.at and now - c.at < LOG_OWNER_T then
+    return false
+  end
+  c.owner, c.at = owner, now
+  return true
+end
+
 -- One data-processing cycle (no lcd.*), the single entry point every consumer
 -- drives. Bails out early on a config error or a missing required sensor so it
 -- never computes on absent values. Returns true when the connected branch ran,
@@ -1528,7 +1549,7 @@ end
 
 local function tick(ctx)
   local active = runTick(ctx)
-  writeLogSensors(ctx)      -- every tick, also on the early returns
+  if ownsLogSensors("LNst", ctx) then writeLogSensors(ctx) end  -- every tick, also on the early returns
   return active
 end
 
