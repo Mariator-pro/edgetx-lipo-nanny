@@ -29,7 +29,7 @@ local Core = {}
 -- Single source of the version: the settings tool reads VERSION, API and
 -- CONFIG_PATH as text from the head of this file (keep them near the top).
 Core.VERSION = "2.0.0"
-Core.API     = { 1, 0 }
+Core.API     = { 1, 1 }
 Core.CONFIG_PATH = "/SCRIPTS/LIPONY/config.lua"
 -- API is the interface version for scripts that load this core: { breaking, additive }.
 -- Adding an exported function or field bumps the second number; changing or
@@ -1343,6 +1343,7 @@ local function evaluateWarnings(ctx)
   if not restPct then return end
 
   local warn, crit = getThresholds(ctx)
+  ctx.restLevelNow = restLevel(restPct, warn, crit)   -- for the log sensor
   if not ctx.warnPlayed and restPct <= warn then
     ctx.warnPlayed = true
     alert(ctx, "warn")
@@ -1479,11 +1480,35 @@ local function preflightMet(ctx)
   return preflight(calculateRestPct(ctx), warn, crit).level == 0
 end
 
+-- Telemetry sensors for the flight log: EdgeTX writes them into every log row,
+-- so a log viewer sees the warning level and the pack. ID 0x4C4E is "LN" in
+-- ASCII. EdgeTX adds a new sensor only while "Discover new sensors" runs.
+local LOG_SENSOR_ID = 0x4C4E
+Core.LOG_SENSORS = { "LNst", "LNpk" }
+
+-- Number of the selected pack from its ID (pack_0002 -> 2), the first of two in
+-- parallel; 0 without a selection.
+local function packNumber(ctx)
+  local inst = ctx.selectedInstances and ctx.selectedInstances[1]
+  return (inst and type(inst.id) == "string" and tonumber(string.match(inst.id, "(%d+)$"))) or 0
+end
+
+-- LNst: level of the remaining capacity this tick (0 OK, 1 warning, 2 critical),
+-- as evaluateWarnings found it; -1 when the tick did not get that far (no pack,
+-- no value, config error, missing sensor, not connected).
+-- LNpk: number of the selected pack, 0 without one.
+local function writeLogSensors(ctx)
+  if not setTelemetryValue then return end
+  setTelemetryValue(LOG_SENSOR_ID, 0, 0, ctx.restLevelNow or -1, 0, 0, "LNst")
+  setTelemetryValue(LOG_SENSOR_ID, 1, 0, packNumber(ctx), 0, 0, "LNpk")
+end
+
 -- One data-processing cycle (no lcd.*), the single entry point every consumer
 -- drives. Bails out early on a config error or a missing required sensor so it
 -- never computes on absent values. Returns true when the connected branch ran,
 -- so the caller knows when to poll its own selection input.
-local function tick(ctx)
+local function runTick(ctx)
+  ctx.restLevelNow = nil    -- set again by evaluateWarnings, never left from an earlier tick
   local saving = ctx.saveJob ~= nil
   stepSave(ctx)             -- first: a config error or missing sensor must not stall it
   -- The save re-reads the file itself and sets ctx.config; polling during it (or
@@ -1499,6 +1524,12 @@ local function tick(ctx)
   evaluateWarnings(ctx)
   refreshTimeLeft(ctx)      -- snapshot the displayed time-left every 2 s
   return true
+end
+
+local function tick(ctx)
+  local active = runTick(ctx)
+  writeLogSensors(ctx)      -- every tick, also on the early returns
+  return active
 end
 
 -- Stick-gesture thresholds for the selection popup (getValue range -1024..+1024).
@@ -1690,6 +1721,7 @@ Core.detectBattery        = detectBattery
 Core.evaluateWarnings     = evaluateWarnings
 Core.finalizeFlight       = finalizeFlight
 Core.stepSave             = stepSave
+Core.writeLogSensors      = writeLogSensors
 
 -- Link status + selection helpers the widget's tiles / stick input consult
 Core.isOnline             = isOnline
