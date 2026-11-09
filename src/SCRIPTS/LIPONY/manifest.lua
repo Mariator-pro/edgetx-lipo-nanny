@@ -57,9 +57,9 @@ return function(core)
     resets = {
       { id = "settings", label = "Reset settings", ask = "Reset warnings and sounds to factory defaults? No data is lost.",
         run = core.resetSettings },
-      { id = "stats",    label = "Reset stats", ask = "Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Batteries and models stay.",
+      { id = "stats",    label = "Reset statistics", ask = "Reset all statistics? Cycle counts, Life mAh, Vmin, Last used and the archive are erased. Batteries and models stay.",
         run = core.resetStats },
-      { id = "factory",  label = "Factory reset", ask = "Factory reset? All batteries, models, statistics and settings are erased.",
+      { id = "factory",  label = "Factory reset", ask = "Reset Lipo Nanny to factory settings? All batteries, models, statistics and settings are erased.",
         run = core.factoryReset },
     },
   }
