@@ -53,12 +53,13 @@ return function(core)
       if v.warnPct <= v.critPct then return "Battery low must be above Battery critical" end
     end,
 
+    -- id never changes once released: other programs recognise a reset by it, not by its label
     resets = {
-      { label = "Reset settings", ask = "Reset warnings and sounds to factory defaults? No data is lost.",
+      { id = "settings", label = "Reset settings", ask = "Reset warnings and sounds to factory defaults? No data is lost.",
         run = core.resetSettings },
-      { label = "Reset stats", ask = "Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Batteries and models stay.",
+      { id = "stats",    label = "Reset stats", ask = "Reset all statistics? Cycle counts, life mAh, Vmin and the archive are erased. Batteries and models stay.",
         run = core.resetStats },
-      { label = "Factory reset", ask = "Factory reset? All batteries, models, statistics and settings are erased.",
+      { id = "factory",  label = "Factory reset", ask = "Factory reset? All batteries, models, statistics and settings are erased.",
         run = core.factoryReset },
     },
   }

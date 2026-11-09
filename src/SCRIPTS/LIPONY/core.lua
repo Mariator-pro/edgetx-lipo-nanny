@@ -29,7 +29,7 @@ local Core = {}
 -- Single source of the version: the settings tool reads VERSION, API and
 -- CONFIG_PATH as text from the head of this file (keep them near the top).
 Core.VERSION = "2.1.0"
-Core.API     = { 1, 1 }
+Core.API     = { 1, 2 }
 Core.CONFIG_PATH = "/SCRIPTS/LIPONY/config.lua"
 -- API is the interface version for scripts that load this core: { breaking, additive }.
 -- Adding an exported function or field bumps the second number; changing or
