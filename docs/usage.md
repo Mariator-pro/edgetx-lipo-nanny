@@ -146,7 +146,7 @@ thresholds:
   used pack, even when the flight was too short to earn a cycle.
 - Set a pack's **Wear %** (Batteries → profile → Packs) as it ages; the warnings
   then fire **earlier** without you re-tuning any thresholds.
-- Reset all cycle counts and statistics via **Reset statistics** in the Lipo Nanny popup of Flight Bag; the
+- Clear all cycle counts and statistics via **Clear statistics** in the Lipo Nanny popup of Flight Bag; the
   running widget picks the change up within a few seconds, no restart needed.
 
 ---
