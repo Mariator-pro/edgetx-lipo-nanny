@@ -95,7 +95,8 @@ Besides the flight view above, the widget shows a page for each other phase of a
    SCRIPTS/
    ├── LIPONY/
    │   ├── core.lua            ← shared logic
-   │   └── manifest.lua        ← Flight Bag settings
+   │   ├── manifest.lua        ← Flight Bag settings
+   │   └── lang/               ← Flight Bag texts (English, German)
    ├── FLIGHTBAG/              ← Flight Bag pages
    └── TOOLS/
        └── FLIGHTBAG.lua       ← Tools menu entry

@@ -88,11 +88,19 @@ local LIMITS = {
   wear           = { min = 0, max = 50, step = 1 },
 }
 local DEFAULTS = { warnPct = 30, critPct = 20, audio = true, haptic = false, hapticStrength = 2,
-                   cells = 6, capacityMah = 1300, flightTime = "timer" }
+                   cells = 6, capacityMah = 1300, flightTime = "timer", language = "en" }
 -- Time on the flight page beside the %: EdgeTX Timer 1 or the remaining flight time.
 Core.FLIGHT_TIMES = { "timer", "timeleft" }
 Core.LIMITS   = LIMITS
 Core.DEFAULTS = DEFAULTS
+
+-- Languages of the settings tool's texts (/SCRIPTS/LIPONY/lang/<code>.lua); the
+-- widget and the announcements are English only.
+Core.LANGUAGES = { "en", "de" }
+local function languageOr(v, fallback)
+  for _, code in ipairs(Core.LANGUAGES) do if v == code then return v end end
+  return fallback
+end
 
 -- Battery chemistries. Per entry: chargeVoltage (100% SoC), dischargeVoltage
 -- (0% SoC), a descending SoC curve of {v_per_cell, soc%} pairs (5% steps) used by
@@ -383,6 +391,7 @@ local function normalizeConfig(cfg)
   out.hapticStrength = clampNum(out.hapticStrength, L.hapticStrength.min, L.hapticStrength.max,
                                 DEFAULTS.hapticStrength)
   if out.flightTime ~= "timeleft" then out.flightTime = DEFAULTS.flightTime end
+  out.language = languageOr(out.language, DEFAULTS.language)
   local snd, sounds = (type(out.sounds) == "table") and out.sounds or {}, {}
   for k, v in pairs(snd) do sounds[k] = v end
   for _, k in ipairs(Core.SOUND_KEYS) do sounds[k] = soundOr(snd[k]) end
@@ -461,6 +470,7 @@ local function defaultConfig()
     haptic        = DEFAULTS.haptic,
     hapticStrength = DEFAULTS.hapticStrength,
     flightTime    = DEFAULTS.flightTime,
+    language      = DEFAULTS.language,
     batteries     = {},
     archive       = {},
     sounds        = {},
@@ -469,7 +479,7 @@ local function defaultConfig()
 end
 
 -- Settings back to factory values (thresholds, sounds); batteries, models and statistics
--- stay, and so do the shared settings (audio, haptic, flight time), which are set once for
+-- stay, and so do the shared settings (audio, haptic, flight time, language), which are set once for
 -- all scripts in the settings tool. Returns true on success; false without a readable
 -- config, so a damaged file is never overwritten.
 local function resetSettings()
@@ -501,6 +511,7 @@ local function factoryReset()
   if cfg then
     fresh.audio, fresh.haptic, fresh.hapticStrength = cfg.audio, cfg.haptic, cfg.hapticStrength
     fresh.flightTime = cfg.flightTime
+    fresh.language   = cfg.language
     fresh.generation = cfg.generation
   end
   return saveConfig(fresh)
@@ -1445,30 +1456,80 @@ end
 -- Per-tick pipeline
 -- ---------------------------------------------------------------------------
 
--- Setup errors of the active model that need no telemetry, one text each (the
--- settings tool lists them; a widget only shows that there is one). ctx as kept
--- by tick (or pollConfig); without ctx a fresh one is read for the call.
-local function setupErrors(ctx)
+-- Setup problems of the active model that need no telemetry, as { id = ...,
+-- <values> } (the settings tool lists them; a widget only shows that there is
+-- one). An id never changes once released. ctx as kept by tick (or pollConfig);
+-- without ctx a fresh one is read for the call.
+local function setupIssues(ctx)
   if not ctx then
     ctx = Core.newContext()
     pollConfig(ctx)
   end
-  if ctx.configError == "missing" then return { "No settings file yet" } end
-  if ctx.configError then return { "Settings file damaged" } end
-  if ctx.modelError == "missing" then return { "Model not set up" } end
+  if ctx.configError == "missing" then return { { id = "noConfig" } } end
+  if ctx.configError then return { { id = "damaged" } } end
+  if ctx.modelError == "missing" then return { { id = "modelNotSetUp" } } end
   local out = {}
   if ctx.modelError == "no_batteries" then
-    out[#out + 1] = "No batteries assigned to this model"
+    out[#out + 1] = { id = "noBatteries" }
   elseif not hasMatchingCellProfile(ctx) then
-    out[#out + 1] = "No assigned battery has " .. tostring(ctx.cells) .. " cells"
+    out[#out + 1] = { id = "noCellMatch", cells = ctx.cells }
   end
   checkSensors(ctx)
   local missing = {}
   if not ctx.hasRxBt then missing[#missing + 1] = ctx.sensorVoltage end
   if not ctx.hasCapa then missing[#missing + 1] = ctx.sensorCapacity end
   if #missing > 0 then
-    out[#out + 1] = "Missing sensors: " .. table.concat(missing, ", ")
-    out[#out + 1] = "Check sensors config"
+    out[#out + 1] = { id = "missingSensors", sensors = table.concat(missing, ", ") }
+    out[#out + 1] = { id = "checkSensors" }
+  end
+  return out
+end
+
+-- Texts of one language: T(area, id [, part [, key]]) gives the text, or nil. A
+-- text missing in that language comes from English, loaded when first needed.
+local LANG_DIR = "/SCRIPTS/LIPONY/lang/"
+local langEn
+local function loadLang(code)
+  local chunk = loadScript(LANG_DIR .. code .. ".lua")
+  local ok, t = false, nil
+  if chunk then ok, t = pcall(chunk) end
+  return ok and type(t) == "table" and t or {}
+end
+local function dig(t, a, b, c, d)
+  for _, k in ipairs({ a, b, c, d }) do
+    if type(t) ~= "table" then return nil end
+    t = t[k]
+  end
+  return t
+end
+function Core.texts(code)
+  code = languageOr(code, "en")
+  local own = code ~= "en" and loadLang(code) or nil
+  return function(a, b, c, d)
+    local v = own and dig(own, a, b, c, d)
+    if v == nil then
+      langEn = langEn or loadLang("en")
+      v = dig(langEn, a, b, c, d)
+    end
+    return v
+  end
+end
+
+-- A text with its {name} placeholders filled from `values`.
+function Core.fillText(s, values)
+  return (string.gsub(s, "{(%w+)}", function(k)
+    local v = values and values[k]
+    if v ~= nil then return tostring(v) end
+  end))
+end
+
+-- The setup problems as English sentences (the widgets show these); the texts
+-- are only loaded while there is a problem.
+local function setupErrors(ctx)
+  local issues, out = setupIssues(ctx), {}
+  if #issues > 0 then
+    local T = Core.texts("en")
+    for i, e in ipairs(issues) do out[i] = Core.fillText(T("setup", e.id) or e.id, e) end
   end
   return out
 end
@@ -1735,6 +1796,7 @@ Core.activeModelName      = activeModelName
 Core.tick                 = tick
 Core.pollConfig           = pollConfig
 Core.checkSensors         = checkSensors
+Core.setupIssues          = setupIssues
 Core.setupErrors          = setupErrors
 Core.readTelemetry        = readTelemetry
 Core.updateStateMachine   = updateStateMachine
