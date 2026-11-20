@@ -109,14 +109,15 @@ thresholds:
 | **Battery low** | 30 % | `/SOUNDS/en/SCRIPTS/LIPONY/warn.wav` |
 | **Battery critical** | 20 % | `/SOUNDS/en/SCRIPTS/LIPONY/crit.wav` |
 | **Battery not charged** | pack already below Battery low when plugged in | `/SOUNDS/en/SCRIPTS/LIPONY/charge.wav` |
+| **No battery selected** | armed without a chosen pack | `/SOUNDS/en/SCRIPTS/LIPONY/nopack.wav` |
 
 - Each fires **once** per flight (it won't nag repeatedly).
 - Which file plays is selectable **per warning** on the Flight Bag **Alerts** page;
-  `warn.wav` / `crit.wav` / `charge.wav` are just the defaults. Drop any named `*.wav` into
+  `warn.wav` / `crit.wav` / `charge.wav` / `nopack.wav` are just the defaults. Drop any named `*.wav` into
   `/SOUNDS/en/SCRIPTS/LIPONY/` and pick it there, or choose **Off** to silence
   that warning's voice entirely.
 - **Optional haptic:** enable **Alerts → Vibration** in Flight Bag and the radio also
-  buzzes with each warning (one pulse for Battery low and Battery not charged, two for Battery critical; strength
+  buzzes with each warning (one pulse for Battery low, Battery not charged and No battery selected, two for Battery critical; strength
   selectable). No effect on radios without a vibration motor. The haptic is
   independent of the voice: a warning set to **Off** still buzzes when haptic is on.
 - **All sounds off:** **Sounds** `Off` in the Flight Bag Alerts page silences every
@@ -127,6 +128,9 @@ thresholds:
   *"battery not charged"* once instead (as soon as the pack is detected or picked).
   "Return home" and "land now" only play for thresholds crossed later, never for
   one the pack was already below on the ground.
+- If you **arm without a chosen pack** (selection still open, or no pack with the
+  model's cell count), you hear *"no battery selected"* once: without a pack there is
+  no percentage and no Battery low or Battery critical.
 - Thresholds are global (Flight Bag **Warnings** page) and can be overridden **per profile**.
 - The files are yours to supply, e.g. *"return to home"* and *"land now"*. A
   missing file just stays silent; nothing breaks.

@@ -25,6 +25,7 @@ return {
     warn   = { label = "Akku niedrig", hint = 'Bei der Schwelle "Akku niedrig"' },
     crit   = { label = "Akku kritisch", hint = 'Bei der Schwelle "Akku kritisch"' },
     charge = { label = "Akku nicht geladen", hint = 'Pack beim Anstecken schon unter "Akku niedrig"' },
+    nopack = { label = "Kein Akku gewählt", hint = "Scharf geschaltet ohne gewählten Akku" },
   },
   resets = {
     settings = { label = "Einstellungen zurücksetzen",

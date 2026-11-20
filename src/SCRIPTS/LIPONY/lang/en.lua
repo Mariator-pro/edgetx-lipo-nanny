@@ -26,6 +26,7 @@ return {
     warn   = { label = "Battery low", hint = "At the Battery low threshold" },
     crit   = { label = "Battery critical", hint = "At the Battery critical threshold" },
     charge = { label = "Battery not charged", hint = "Pack already below Battery low when plugged in" },
+    nopack = { label = "No battery selected", hint = "Armed without a chosen pack" },
   },
   resets = {
     settings = { label = "Reset settings", ask = "Reset Lipo Nanny's settings? Batteries, models and statistics stay.",

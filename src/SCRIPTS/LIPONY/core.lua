@@ -65,14 +65,14 @@ local DEFAULT_SENSOR_CAPACITY = DEFAULT_SENSORS.capacity
 -- sounds.<key> (false = muted, absent = the default; a missing custom file
 -- falls back to the default).
 Core.SOUND_DIR      = "/SOUNDS/en/SCRIPTS/LIPONY/"
-Core.SOUND_KEYS     = { "warn", "crit", "charge" }
-Core.SOUND_DEFAULTS = { warn = "warn.wav", crit = "crit.wav", charge = "charge.wav" }
+Core.SOUND_KEYS     = { "warn", "crit", "charge", "nopack" }
+Core.SOUND_DEFAULTS = { warn = "warn.wav", crit = "crit.wav", charge = "charge.wav", nopack = "nopack.wav" }
 
 -- Optional haptic alongside the warning sounds, off by default: pulse length per
 -- strength tier (tune on the radio) and pulses per warning (critical buzzes twice).
 local HAPTIC_DUR = { [1] = 15, [2] = 30, [3] = 50 }
 Core.HAPTIC_DUR    = HAPTIC_DUR
-Core.HAPTIC_PULSES = { warn = 1, crit = 2, charge = 1 }
+Core.HAPTIC_PULSES = { warn = 1, crit = 2, charge = 1, nopack = 1 }
 
 -- Editable ranges and factory defaults, keyed like the config: the single source
 -- for defaultConfig(), getThresholds(), normalizeConfig() and the settings tool.
@@ -670,10 +670,14 @@ end
 -- keeps the last valid value on ctx (invalid samples and samples without link
 -- dropped). Voltage validation needs ctx.cells.
 local function readTelemetry(ctx)
+  local up = linkUp()
   local v = safeGetValue(ctx.sensorVoltage)
   local i = safeGetValue(ctx.sensorCurrent)
   local q = safeGetValue(ctx.sensorCapacity)
-  local link = linkUp()
+  local okFm, fm = pcall(getValue, "FM")
+  -- Link up before AND after the reads: a link that drops in between returns 0
+  -- for every sensor (FM 0 reads as disarmed).
+  local link = up and linkUp()
   ctx.linkUp = link
 
   -- FC on USB (no battery): link live but voltage, current and capacity all zero.
@@ -685,7 +689,6 @@ local function readTelemetry(ctx)
   if not link then return end
   -- Armed state from the CRSF flight mode text (true only when known armed),
   -- for the flight phase.
-  local okFm, fm = pcall(getValue, "FM")
   ctx.armed = armedFromFM(ctx, okFm and fm or nil)
 
   -- Voltage: [0.5 V × cells … 5 V × cells]
@@ -809,6 +812,7 @@ local function resetFlightState(ctx)
   ctx.warnPlayed          = false
   ctx.critPlayed          = false
   ctx.chargePending       = false
+  ctx.nopackPlayed        = false
   ctx.avgCurrent          = nil   -- moving average current while flying (A)
   ctx.currentSampleCount  = 0
   ctx.flyingTicks         = 0     -- ticks flown, for the time-left warm-up
@@ -1340,12 +1344,20 @@ local function alert(ctx, key)
   wakeDisplay()
 end
 
--- Plays "not charged" once for a pack already low at connect, then the warn /
--- crit voice file once each as the remaining percentage drops past the
--- thresholds. No debounce: the mAh counter only rises, so each threshold is
--- crossed exactly once per flight.
+-- Plays "no battery selected" once when armed without a chosen pack (after the
+-- settle window, so detection had its chance), "not charged" once for a pack
+-- already low at connect, then the warn / crit voice file once each as the
+-- remaining percentage drops past the thresholds. No debounce: the mAh counter
+-- only rises, so each threshold is crossed exactly once per flight.
 local function evaluateWarnings(ctx)
-  if not ctx.selectedProfile then return end
+  if not ctx.selectedProfile then
+    if ctx.armed and not ctx.nopackPlayed
+       and getTime() - (ctx.connectedSinceTime or 0) >= SETTLE_DELAY then
+      ctx.nopackPlayed = true
+      alert(ctx, "nopack")
+    end
+    return
+  end
   if ctx.chargePending then
     ctx.chargePending = false
     alert(ctx, "charge")
@@ -1746,6 +1758,7 @@ local function newContext()
     warnPlayed = false,
     critPlayed = false,
     chargePending = false,
+    nopackPlayed = false,
 
     -- Time-left averaging
     avgCurrent = nil,
