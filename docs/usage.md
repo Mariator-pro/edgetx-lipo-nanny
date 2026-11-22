@@ -58,6 +58,13 @@ needed:
   (each row shows the pack label and its cycle count, e.g. `6S 1300 #1 (12c)`).
 - **Aileron full right, held ~1 s** (with elevator centred) confirms. A green
   fill bar grows across the row while you hold; the pick commits when it's full.
+- **In flight the sticks do nothing:** while armed the gestures are locked. On a
+  model without a flight controller (no flight mode sensor) the widget cannot tell
+  armed from disarmed, so there the gestures only work with the throttle stick
+  fully down.
+- **Armed without a pack:** the tile shows a yellow `No battery selected` hint
+  (there are no battery warnings without a pack). Disarm, and the selection
+  comes back.
 
 The on-screen legend reads `ele: up/dn  ail: hold >`. **Parallel** models ask for
 two slots in turn: the title reads `SELECT PACK SLOT 1`, then `SELECT PACK

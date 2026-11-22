@@ -516,12 +516,16 @@ local function msgLineH(flag)
 end
 
 -- Largest MSG_FONT_STEPS flag whose `lines` fit `availW` wide AND `availH` tall;
--- falls back to SMLSIZE. Returns the flag and its line height.
-local function pickMsgFont(lines, availW, availH)
+-- falls back to SMLSIZE. Returns the flag and its line height. ref: optional
+-- texts that must fit the width too (same size as another message).
+local function pickMsgFont(lines, availW, availH, ref)
   for _, flag in ipairs(MSG_FONT_STEPS) do
     local lineH = msgLineH(flag)
     local fits  = #lines * lineH <= availH
     for _, t in ipairs(lines) do
+      if textW(t, flag) > availW then fits = false break end
+    end
+    for _, t in ipairs(ref or {}) do
       if textW(t, flag) > availW then fits = false break end
     end
     if fits then return flag, lineH end
@@ -531,7 +535,8 @@ end
 
 -- Renders centred lines below `topY` (so a reserved header band isn't overlapped),
 -- clamped to start at topY on zones too short to centre. Used by the error/info tiles.
-local function drawCenteredLines(ctx, lines, topY, flag, lineH)
+-- cols: optional colour per line (default the text colour).
+local function drawCenteredLines(ctx, lines, topY, flag, lineH, cols)
   local n = #lines
   if n == 0 then return end
   local w, h   = ctx.zone.w, ctx.zone.h
@@ -539,7 +544,7 @@ local function drawCenteredLines(ctx, lines, topY, flag, lineH)
   local startY = topY + math.floor(((h - topY) - n * lineH) / 2)
   if startY < topY then startY = topY end
   for i = 1, n do
-    dtext(cx, startY + (i - 1) * lineH, lines[i], COLORS.fg, flag + CENTER)
+    dtext(cx, startY + (i - 1) * lineH, lines[i], (cols and cols[i]) or COLORS.fg, flag + CENTER)
   end
 end
 
@@ -1016,20 +1021,29 @@ end
 -- Brand heading with centred message lines below it. On a zone too short for both
 -- (even at SMLSIZE), the heading is dropped and the message gets the full zone.
 -- If even every line doesn't fit, trailing context is dropped (see fitLines).
-local function drawHeadedMessage(ctx, lines)
+local function drawHeadedMessage(ctx, lines, cols, ref)
   local w, h   = ctx.zone.w, ctx.zone.h
   local availW = w - 2 * sx(4)
   local hb     = headerBandH()
   if h - hb >= #lines * msgLineH(SMLSIZE) then
     drawBrandHeading(ctx)
-    local flag, lineH = pickMsgFont(lines, availW, h - hb)
-    drawCenteredLines(ctx, lines, hb, flag, lineH)
+    local flag, lineH = pickMsgFont(lines, availW, h - hb, ref)
+    drawCenteredLines(ctx, lines, hb, flag, lineH, cols)
   else
     local maxLines    = math.max(1, math.floor(h / msgLineH(SMLSIZE)))
     local shown       = fitLines(lines, maxLines)
-    local flag, lineH = pickMsgFont(shown, availW, h)
-    drawCenteredLines(ctx, shown, 0, flag, lineH)
+    local flag, lineH = pickMsgFont(shown, availW, h, ref)
+    drawCenteredLines(ctx, shown, 0, flag, lineH, cols and fitLines(cols, maxLines))   -- colours trimmed alike
   end
+end
+
+-- Longest error text: the no-pack hint takes the font it gets, so both look alike.
+local CONFIG_ERROR = { "Configuration error", "Please check Tool Flight Bag" }
+
+-- Armed without a chosen pack: the selection cannot be used in flight, so a
+-- yellow hint instead (no % and no battery warnings without a pack).
+local function drawNoPackTile(ctx)
+  drawHeadedMessage(ctx, { "No battery selected", "No battery warnings" }, { WARN_COL, COLORS.fg }, { CONFIG_ERROR[2] })
 end
 
 -- Generic 2-line error tile.
@@ -1116,13 +1130,19 @@ local function drawTile(ctx)
   -- Setup problems (settings, model, sensors, cell count): one tile, the details
   -- are listed in the settings tool.
   if #core.setupErrors(ctx) > 0 then
-    drawErrorTile(ctx, "Configuration error", "Please check Tool Flight Bag")
+    drawErrorTile(ctx, CONFIG_ERROR[1], CONFIG_ERROR[2])
     return
   end
 
   -- Battery-selection popup (0 or >1 plausible candidates). Driven by stick
   -- gestures in tick() (core.pollSelectionSticks); here we only render it. Commit
   -- clears pendingSelection, so the next frame falls through to the live tile.
+  -- Armed (known): the gestures are locked, a hint instead of the popup.
+  if ctx.pendingSelection and ctx.disarmSeen and ctx.armed then
+    drawNoPackTile(ctx)
+    if ctx.linkUp then drawHeartbeat(ctx) end
+    return
+  end
   if ctx.pendingSelection then
     drawSelectionPopup(ctx)
     if ctx.linkUp then drawHeartbeat(ctx) end   -- heartbeat only while packets arrive (core)

@@ -28,7 +28,7 @@
 local Core = {}
 -- Single source of the version: the settings tool reads VERSION, API and
 -- CONFIG_PATH as text from the head of this file (keep them near the top).
-Core.VERSION = "2.2.0"
+Core.VERSION = "2.3.0"
 Core.API     = { 1, 2 }
 Core.CONFIG_PATH = "/SCRIPTS/LIPONY/config.lua"
 -- API is the interface version for scripts that load this core: { breaking, additive }.
@@ -1633,15 +1633,33 @@ local CONFIRM_THRESHOLD = 922  -- aileron deflection (90 %, right) that means "c
 local CONFIRM_HOLD      = 100  -- 1.0 s hold (hundredths of a second) before commit
 local CONFIRM_SHOW      = 10   -- the full bar stays this long (and one tick at least) before the commit
 Core.CONFIRM_HOLD = CONFIRM_HOLD
+local THROTTLE_LOW      = -922 -- throttle stick in its lowest 5 %
+
+-- Gestures only on the ground. With a known armed state (a disarmed FM text seen
+-- on this link) only while disarmed; without one (no FC or no FM sensor) only
+-- with the throttle stick at the bottom.
+local function sticksFree(ctx)
+  if ctx.disarmSeen then return not ctx.armed end
+  local thr = getValue("thr")
+  return type(thr) == "number" and thr <= THROTTLE_LOW
+end
 
 -- Stick-gesture control for the selection popup, polled every tick by the widget
 -- (works without fullscreen, unlike key events). Elevator moves the cursor one step per deflection
--- (re-armed in the dead-zone); aileron held full-right with elevator centred commits.
+-- (re-armed in the dead-zone); aileron held full-right with elevator centred commits. Locked
+-- unless sticksFree.
 local function pollSelectionSticks(ctx)
   if not ctx.pendingSelection then return end
 
   -- Resolve any slot that has a single candidate before reading the sticks.
   if ctx.parallel and autoSelectSlot(ctx) then return end
+
+  -- Locked in flight: drop a started hold, re-arm both sticks in the centre.
+  if not sticksFree(ctx) then
+    ctx.confirmSince, ctx.confirmFullAt = nil, nil
+    ctx.stickArmed, ctx.confirmArmed = false, false
+    return
+  end
 
   local list = activeSelectionList(ctx)
   local n = #list
